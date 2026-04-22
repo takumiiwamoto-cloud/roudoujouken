@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js
+.next/
+out/
+build/
+dist/
+
+# Environment variables (絶対にコミット禁止)
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+
+# Vercel
+.vercel/
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Testing
+coverage/
+.nyc_output/
+
+# Excel/Word の一時ファイル
+~$*.xlsx
+~$*.docx
+*.tmp
+
+# 設計書展開用の一時フォルダ(parse_xlsx.pl の作業先)
+xlsx_extract/
+
+# Supabase ローカル
+.supabase/
+supabase/.branches/
+supabase/.temp/
+
+# Claude Code のローカル設定(共有不要なもの)
+.claude/settings.local.json
