@@ -1,0 +1,5 @@
+アプリケーションの型定義を置くディレクトリ。
+- database.ts(supabase gen types で生成 or 手書きの DB 型)
+- client-input.ts(Sheet02 の45項目に対応する顧客入力型)
+- office-input.ts(Sheet03 の29項目に対応する事務所側入力型)
+等を Day 4後半(プロンプト2)以降で追加予定。

@@ -1,0 +1,5 @@
+アプリケーション全体で参照する定数を置くディレクトリ。
+- employment-types.ts(雇用形態の選択肢)
+- prefectures.ts(都道府県)
+- template-files.ts(雇用形態 → ひな形ファイル名のマッピング・Sheet04)
+等を必要に応じて追加。
