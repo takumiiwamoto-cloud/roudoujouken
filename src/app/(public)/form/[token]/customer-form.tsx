@@ -89,6 +89,84 @@ function Req({ kaisei = false }: { kaisei?: boolean }) {
   );
 }
 
+/**
+ * 最低賃金チェックの状態を basic_wage フィールド直下に表示するミニパネル。
+ * 判定結果が見える化されていないと UI 上「動いていないように」見えるため追加。
+ */
+function MinWageStatus({
+  prefecture,
+  minimumWage,
+  result,
+  wageType,
+  workTimeType,
+}: {
+  prefecture: string | null;
+  minimumWage: number | null;
+  result: MinimumWageCheckResult | null;
+  wageType: string | undefined;
+  workTimeType: string | undefined;
+}) {
+  const prefLabel = prefecture ?? "(会社所在地から判定不可)";
+  const minLabel =
+    minimumWage !== null ? `${minimumWage}円/h` : "(マスタ未登録 / 取得中)";
+
+  let verdict: React.ReactNode = "—";
+  let tone = "text-muted-foreground";
+
+  if (!result) {
+    verdict = "基本給が入力されるとチェックします";
+  } else if (result.ok === false) {
+    const hourly = Math.floor(result.hourlyEquiv);
+    verdict = (
+      <span className="text-destructive font-medium">
+        NG: 時給換算 {hourly}円 が最低賃金 {result.threshold}円 を下回ります
+      </span>
+    );
+    tone = "";
+  } else if ("skipped" in result && result.skipped) {
+    const reasonLabel: Record<string, string> = {
+      no_prefecture: "会社所在地から都道府県を判定できませんでした",
+      no_minimum_wage_for_prefecture:
+        "当該都道府県の最低賃金マスタが未登録のためスキップ",
+      shift_monthly_indeterminate:
+        "シフト制または日給は事務所側で再チェックします",
+      missing_inputs: "労働時間・休日が未入力のためスキップ",
+    };
+    // missing_inputs は顧客自身で解消できる(働時間・休日を入力)ので注意喚起色
+    const isActionable = result.reason === "missing_inputs";
+    verdict = (
+      <span
+        className={
+          isActionable ? "text-amber-700 font-medium" : "text-muted-foreground"
+        }
+      >
+        スキップ: {reasonLabel[result.reason] ?? result.reason}
+      </span>
+    );
+    if (isActionable) tone = "";
+  } else if (result.ok === true && !("skipped" in result)) {
+    const hourly = Math.floor(result.hourlyEquiv);
+    verdict = (
+      <span className="text-emerald-700 font-medium">
+        OK: 時給換算 {hourly}円 ≧ 最低賃金 {result.threshold}円
+      </span>
+    );
+    tone = "";
+  }
+
+  return (
+    <div className={`mt-1 rounded-md border bg-muted/40 p-2 text-xs ${tone}`}>
+      <div>
+        都道府県: <b>{prefLabel}</b> / 最低賃金: <b>{minLabel}</b>
+      </div>
+      <div>
+        賃金形態: {wageType ?? "-"} / 労働時間区分: {workTimeType ?? "-"}
+      </div>
+      <div className="pt-1">判定: {verdict}</div>
+    </div>
+  );
+}
+
 export function CustomerForm({ request }: { request: RequestSummary }) {
   const derived = useMemo(
     () => deriveDefaultsFromTemplate(request.template_name),
@@ -126,8 +204,8 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
       job_description_initial: "",
       job_description_scope: "",
       work_time_type: "fixed",
-      start_time: "",
-      end_time: "",
+      start_time: "09:00",
+      end_time: "18:00",
       break_minutes: "",
       shift_note: "",
       holidays: [],
@@ -267,6 +345,14 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
         breakMinutes: br,
         annualHolidays,
       });
+      if (monthlyHours === null) {
+        setMinWageResult({
+          ok: true,
+          skipped: true,
+          reason: "missing_inputs",
+        });
+        return;
+      }
       setMinWageResult(
         checkMonthlyWage({
           prefecture,
@@ -425,17 +511,17 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
           <p className="font-medium text-destructive">
             入力内容に不備があります。下記をご確認ください。
           </p>
-          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-destructive">
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs">
             {Object.entries(form.formState.errors).map(([name, err]) => {
               const msg =
                 (err as { message?: string } | undefined)?.message ??
                 "入力を確認してください";
               const label = FIELD_LABELS[name] ?? name;
               return (
-                <li key={name}>
+                <li key={name} className="text-destructive">
                   <button
                     type="button"
-                    className="underline-offset-2 hover:underline"
+                    className="text-destructive underline-offset-2 hover:underline"
                     onClick={() => {
                       const el = document.querySelector<HTMLElement>(
                         `[name="${name}"]`,
@@ -1084,25 +1170,70 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                       <FormField
                         control={form.control}
                         name="break_minutes"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>
-                              休憩時間(分)<Req />
-                            </FormLabel>
-                            <FormControl>
-                              <Input
-                                type="number"
-                                inputMode="numeric"
-                                placeholder="60"
-                                {...field}
-                              />
-                            </FormControl>
-                            <FormDescription>
-                              労働時間6h超→45分以上、8h超→60分以上
-                            </FormDescription>
-                            <FormMessage />
-                          </FormItem>
-                        )}
+                        render={({ field }) => {
+                          const presets = ["15", "30", "45", "60"] as const;
+                          const currentStr =
+                            field.value === "" || field.value === undefined
+                              ? ""
+                              : String(field.value);
+                          const selectValue =
+                            currentStr !== "" &&
+                            (presets as readonly string[]).includes(currentStr)
+                              ? currentStr
+                              : currentStr !== ""
+                                ? "other"
+                                : "";
+                          return (
+                            <FormItem>
+                              <FormLabel>
+                                休憩時間<Req />
+                              </FormLabel>
+                              <FormControl>
+                                <Select
+                                  value={selectValue}
+                                  onValueChange={(v) => {
+                                    if (v === "other") {
+                                      // その他選択時は空文字にして下段の数値入力に促す
+                                      field.onChange("");
+                                    } else {
+                                      field.onChange(Number(v));
+                                    }
+                                  }}
+                                >
+                                  <SelectTrigger>
+                                    <SelectValue placeholder="選択してください" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="15">15分</SelectItem>
+                                    <SelectItem value="30">30分</SelectItem>
+                                    <SelectItem value="45">45分</SelectItem>
+                                    <SelectItem value="60">1時間(60分)</SelectItem>
+                                    <SelectItem value="other">その他(分数を入力)</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                              </FormControl>
+                              {selectValue === "other" && (
+                                <Input
+                                  type="number"
+                                  inputMode="numeric"
+                                  min={0}
+                                  placeholder="例: 75"
+                                  value={currentStr}
+                                  onChange={(e) => {
+                                    const raw = e.target.value;
+                                    field.onChange(
+                                      raw === "" ? "" : Number(raw),
+                                    );
+                                  }}
+                                />
+                              )}
+                              <FormDescription>
+                                労働時間6h超→45分以上、8h超→60分以上
+                              </FormDescription>
+                              <FormMessage />
+                            </FormItem>
+                          );
+                        }}
                       />
                     </div>
                   </>
@@ -1287,11 +1418,23 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                           inputMode="numeric"
                           placeholder="例:250000"
                           {...field}
+                          value={field.value ?? ""}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            field.onChange(raw === "" ? "" : Number(raw));
+                          }}
                         />
                       </FormControl>
                       <FormDescription>
                         最低賃金との比較チェックを行います。
                       </FormDescription>
+                      <MinWageStatus
+                        prefecture={prefecture}
+                        minimumWage={minimumWage}
+                        result={minWageResult}
+                        wageType={wageType}
+                        workTimeType={workTimeType}
+                      />
                       <FormMessage />
                     </FormItem>
                   )}
