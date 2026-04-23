@@ -47,7 +47,7 @@ export default async function CustomerFormPage({
   params: { token: string };
 }) {
   const supabase = createAdminClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("contract_requests")
     .select(
       "id, access_token, status, expires_at, company_name, company_address, representative_name, template_name",
@@ -55,7 +55,16 @@ export default async function CustomerFormPage({
     .eq("access_token", params.token)
     .maybeSingle();
 
-  if (!data) return <InvalidTokenView reason="not_found" />;
+  if (error) {
+    console.error("[form/[token]] supabase fetch error", {
+      token: params.token,
+      error,
+    });
+  }
+  if (!data) {
+    console.warn("[form/[token]] token not found", { token: params.token });
+    return <InvalidTokenView reason="not_found" />;
+  }
   if (new Date(data.expires_at) < new Date()) {
     return <InvalidTokenView reason="expired" />;
   }
