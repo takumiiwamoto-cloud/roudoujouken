@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useForm, useFieldArray, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 
@@ -168,10 +169,13 @@ function MinWageStatus({
 }
 
 export function CustomerForm({ request }: { request: RequestSummary }) {
+  const router = useRouter();
   const derived = useMemo(
     () => deriveDefaultsFromTemplate(request.template_name),
     [request.template_name],
   );
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const form = useForm<ClientFormValues>({
     // @hookform/resolvers@5 × zod@4 の型推論差異を回避するためのキャスト。
@@ -442,16 +446,49 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
     social_insurance: "社会保険",
   };
 
-  const onSubmit = (values: ClientFormValues) => {
-    // eslint-disable-next-line no-console
-    console.log("[C-01 送信(仮)]", {
-      access_token: request.access_token,
-      request_id: request.id,
-      values,
-    });
-    alert(
-      "送信処理は次フェーズ(プロンプト3-C)で実装します。\nブラウザのコンソールに入力内容を出力しました。",
-    );
+  const onSubmit = async (values: ClientFormValues) => {
+    setSubmitError(null);
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: request.access_token,
+          formData: values,
+        }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { redirectTo?: string };
+        router.replace(data.redirectTo ?? "/complete");
+        return;
+      }
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      const messages: Record<string, string> = {
+        token_not_found: "URLが無効です。事務所にご連絡ください。",
+        token_expired:
+          "有効期限が切れています。事務所に新しいURLをご依頼ください。",
+        already_submitted:
+          "このURLからの送信はすでに完了しています。修正はできません。",
+        validation_failed:
+          "入力内容にエラーがあります。ページを更新してから再度お試しください。",
+        invalid_body: "送信データが不正です。ページを更新してください。",
+        internal_error:
+          "サーバーでエラーが発生しました。時間をおいて再度お試しください。",
+      };
+      setSubmitError(
+        messages[body.error ?? ""] ??
+          "送信に失敗しました。時間をおいて再度お試しください。",
+      );
+    } catch {
+      setSubmitError(
+        "通信エラーが発生しました。ネットワーク接続をご確認のうえ再度お試しください。",
+      );
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const onInvalid = (errors: Record<string, unknown>) => {
@@ -481,6 +518,16 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
           </p>
         </CardContent>
       </Card>
+
+      {/* 送信API エラーバナー */}
+      {submitError && (
+        <div
+          role="alert"
+          className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+        >
+          {submitError}
+        </div>
+      )}
 
       {/* No.3 警告: 契約開始日が過去(送信ブロックしない) */}
       {pastStartWarning && (
@@ -1808,12 +1855,13 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
               type="submit"
               size="lg"
               disabled={
+                submitting ||
                 form.formState.isSubmitting ||
                 hasMinWageError ||
                 Object.keys(form.formState.errors).length > 0
               }
             >
-              送信(仮)
+              {submitting ? "送信中..." : "送信"}
             </Button>
           </div>
         </form>
