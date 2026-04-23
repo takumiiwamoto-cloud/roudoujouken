@@ -1,5 +1,0 @@
-設計書 Sheet05 のバリデーションルール(顧客側 No.1-11、事務所側 No.12-18)を実装するディレクトリ。
-- client-form.ts(zodスキーマ)
-- minimum-wage.ts(最低賃金チェック)
-- office-form.ts(事務所側)
-等を Day 5-7 / Day 9-10 で追加予定。
