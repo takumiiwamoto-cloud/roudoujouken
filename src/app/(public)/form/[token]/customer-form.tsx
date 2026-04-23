@@ -1,14 +1,23 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm, useFieldArray, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 
 import {
   clientFormSchema,
   deriveDefaultsFromTemplate,
+  isContractStartInPast,
   type ClientFormValues,
 } from "@/lib/validations/client-form";
+import {
+  calcMonthlyWorkHours,
+  checkHourlyWage,
+  checkMonthlyWage,
+  estimateAnnualHolidays,
+  extractPrefecture,
+  type MinimumWageCheckResult,
+} from "@/lib/validations/minimum-wage";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -163,6 +172,190 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
   const showFixedTermFields =
     !isFullTime && hasContractPeriod === "yes"; // 有期関連(No.12-15)
 
+  // ----------------------------------------------------------------
+  // No.3 警告: 契約開始日が入力時点より過去
+  // ----------------------------------------------------------------
+  const contractStartDate = form.watch("contract_start_date");
+  const pastStartWarning = isContractStartInPast(contractStartDate);
+
+  // ----------------------------------------------------------------
+  // No.6 / No.7 最低賃金チェック(非同期)
+  //   会社所在地の都道府県 → /api/minimum-wage で時給を取得 → チェック
+  // ----------------------------------------------------------------
+  const prefecture = useMemo(
+    () => extractPrefecture(request.company_address),
+    [request.company_address],
+  );
+
+  const [minimumWage, setMinimumWage] = useState<number | null>(null);
+  const [minWageFetchError, setMinWageFetchError] = useState<string | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!prefecture) return;
+    let cancelled = false;
+    fetch(`/api/minimum-wage?prefecture=${encodeURIComponent(prefecture)}`)
+      .then(async (r) => {
+        if (cancelled) return;
+        if (r.status === 404) {
+          setMinimumWage(null);
+          setMinWageFetchError("該当都道府県の最低賃金マスタが未登録です");
+          return;
+        }
+        if (!r.ok) {
+          setMinWageFetchError("最低賃金の取得に失敗しました");
+          return;
+        }
+        const data = (await r.json()) as { hourly_wage: number };
+        setMinimumWage(data.hourly_wage);
+        setMinWageFetchError(null);
+      })
+      .catch(() => {
+        if (!cancelled) setMinWageFetchError("最低賃金の取得に失敗しました");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [prefecture]);
+
+  const basicWage = form.watch("basic_wage");
+  const wageType = form.watch("wage_type");
+  const startTime = form.watch("start_time");
+  const endTime = form.watch("end_time");
+  const breakMinutes = form.watch("break_minutes");
+  const holidayWeekdays = form.watch("holiday_weekdays");
+
+  const [minWageResult, setMinWageResult] =
+    useState<MinimumWageCheckResult | null>(null);
+
+  useEffect(() => {
+    const wage = typeof basicWage === "number" ? basicWage : Number(basicWage);
+    if (!Number.isFinite(wage) || wage <= 0) {
+      setMinWageResult(null);
+      return;
+    }
+
+    if (wageType === "hourly") {
+      setMinWageResult(
+        checkHourlyWage({
+          prefecture,
+          minimumWage,
+          hourlyWage: wage,
+        }),
+      );
+      return;
+    }
+
+    if (wageType === "monthly" || wageType === "daily_monthly") {
+      if (workTimeType !== "fixed") {
+        setMinWageResult({
+          ok: true,
+          skipped: true,
+          reason: "shift_monthly_indeterminate",
+        });
+        return;
+      }
+      const br =
+        typeof breakMinutes === "number"
+          ? breakMinutes
+          : Number(breakMinutes) || null;
+      const annualHolidays = estimateAnnualHolidays(holidays, holidayWeekdays);
+      const monthlyHours = calcMonthlyWorkHours({
+        startTime,
+        endTime,
+        breakMinutes: br,
+        annualHolidays,
+      });
+      setMinWageResult(
+        checkMonthlyWage({
+          prefecture,
+          minimumWage,
+          basicWage: wage,
+          monthlyHours,
+        }),
+      );
+      return;
+    }
+
+    // 日給は顧客側で月所定時間を組むのが困難なため、事務所側で再チェックする方針。
+    setMinWageResult({
+      ok: true,
+      skipped: true,
+      reason: "shift_monthly_indeterminate",
+    });
+  }, [
+    basicWage,
+    wageType,
+    workTimeType,
+    startTime,
+    endTime,
+    breakMinutes,
+    holidays,
+    holidayWeekdays,
+    prefecture,
+    minimumWage,
+  ]);
+
+  const hasMinWageError = minWageResult?.ok === false;
+
+  // basic_wage の FormMessage と同じ枠でエラー表示させる
+  const lastMinWageErrorRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (hasMinWageError && !("skipped" in (minWageResult ?? {}))) {
+      const r = minWageResult as Extract<
+        MinimumWageCheckResult,
+        { ok: false }
+      >;
+      form.setError("basic_wage", {
+        type: "min_wage",
+        message: `時給換算 ${Math.floor(r.hourlyEquiv)}円 が${r.prefecture}の最低賃金 ${r.threshold}円 を下回っています`,
+      });
+      lastMinWageErrorRef.current = true;
+    } else if (lastMinWageErrorRef.current) {
+      // 直前に最賃エラーを出していた場合のみクリア(他の zod エラーを潰さない)
+      const current = form.formState.errors.basic_wage;
+      if (current?.type === "min_wage") form.clearErrors("basic_wage");
+      lastMinWageErrorRef.current = false;
+    }
+  }, [hasMinWageError, minWageResult, form]);
+
+  // ----------------------------------------------------------------
+  // エラーサマリ用
+  // ----------------------------------------------------------------
+  const FIELD_LABELS: Record<string, string> = {
+    last_name: "姓",
+    first_name: "名",
+    last_name_kana: "姓(フリガナ)",
+    first_name_kana: "名(フリガナ)",
+    birth_date: "生年月日",
+    postal_code: "郵便番号",
+    address: "住所",
+    phone: "電話番号",
+    email: "メールアドレス",
+    employment_type: "雇用形態",
+    has_contract_period: "契約期間の定め",
+    contract_start_date: "契約開始日",
+    contract_end_date: "契約終了日",
+    renewal_limit_exists: "更新上限の定め",
+    renewal_limit_content: "更新上限の内容",
+    probation_period: "試用期間",
+    work_location_initial: "雇入れ直後の就業場所",
+    work_location_scope: "就業場所の変更の範囲",
+    job_description_initial: "雇入れ直後の業務内容",
+    job_description_scope: "業務の変更の範囲",
+    start_time: "始業時刻",
+    end_time: "終業時刻",
+    break_minutes: "休憩時間",
+    holidays: "休日",
+    holiday_weekdays: "休日指定曜日",
+    basic_wage: "基本給",
+    payment_cutoff_day: "賃金締切日",
+    payment_cutoff_other: "賃金締切日(その他)",
+    payment_date: "賃金支払日",
+    social_insurance: "社会保険",
+  };
+
   const onSubmit = (values: ClientFormValues) => {
     // eslint-disable-next-line no-console
     console.log("[C-01 送信(仮)]", {
@@ -202,6 +395,66 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
           </p>
         </CardContent>
       </Card>
+
+      {/* No.3 警告: 契約開始日が過去(送信ブロックしない) */}
+      {pastStartWarning && (
+        <div
+          role="status"
+          className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+        >
+          契約開始日が本日より前の日付になっています。中途入社などで過去日付にする場合はそのままで問題ありません。
+        </div>
+      )}
+
+      {/* 最賃マスタ未登録などの通知(任意) */}
+      {minWageFetchError && (
+        <div
+          role="status"
+          className="mb-4 rounded-md border border-slate-300 bg-slate-50 p-3 text-xs text-slate-700"
+        >
+          {minWageFetchError}。最低賃金チェックは事務所側で実施します。
+        </div>
+      )}
+
+      {/* エラーサマリ: form.formState.errors を集約表示 */}
+      {Object.keys(form.formState.errors).length > 0 && (
+        <div
+          role="alert"
+          className="mb-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm"
+        >
+          <p className="font-medium text-destructive">
+            入力内容に不備があります。下記をご確認ください。
+          </p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-destructive">
+            {Object.entries(form.formState.errors).map(([name, err]) => {
+              const msg =
+                (err as { message?: string } | undefined)?.message ??
+                "入力を確認してください";
+              const label = FIELD_LABELS[name] ?? name;
+              return (
+                <li key={name}>
+                  <button
+                    type="button"
+                    className="underline-offset-2 hover:underline"
+                    onClick={() => {
+                      const el = document.querySelector<HTMLElement>(
+                        `[name="${name}"]`,
+                      );
+                      el?.scrollIntoView({
+                        behavior: "smooth",
+                        block: "center",
+                      });
+                      (el as HTMLInputElement | null)?.focus?.();
+                    }}
+                  >
+                    {label}: {msg}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
 
       <Form {...form}>
         <form
@@ -1402,13 +1655,21 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
             </AccordionItem>
           </Accordion>
 
-          <div className="flex items-center justify-between gap-3 pt-2">
+          <div className="flex flex-col gap-2 pt-2 md:flex-row md:items-center md:justify-between">
             <p className="text-xs text-muted-foreground">
               <span className="text-destructive">*</span> 必須項目 /{" "}
               <span className="text-amber-600">*(2024年改正)</span>{" "}
               2024年4月労基法改正で追加された必須項目
             </p>
-            <Button type="submit" size="lg">
+            <Button
+              type="submit"
+              size="lg"
+              disabled={
+                form.formState.isSubmitting ||
+                hasMinWageError ||
+                Object.keys(form.formState.errors).length > 0
+              }
+            >
               送信(仮)
             </Button>
           </div>
