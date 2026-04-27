@@ -1,33 +1,33 @@
 import { z } from "zod";
 
+import {
+  ALLOWANCE_PATTERNS,
+  allowanceTypeValues,
+  type AllowanceType,
+} from "@/lib/allowances";
+
 import { calcNetWorkMinutes } from "./minimum-wage";
 
 /**
- * 顧客入力フォーム(C-01 / 設計書 Sheet02 の45項目)の zod スキーマ。
+ * 顧客入力フォーム(C-01)の zod スキーマ。
  *
- * Sheet05 の顧客側ルール(No.1-11)を反映:
- *   - No.1  必須項目               → 各フィールドの .min(1) / enum
- *   - No.2  契約開始日 < 契約終了日 → superRefine
- *   - No.3  契約開始日 ≧ 入力時点   → 警告(UI側で注意喚起のみ、送信可)
- *   - No.4  メール形式             → .email() (任意項目のため optional)
- *   - No.5  郵便番号 7桁           → .regex(/^\d{7}$/)
- *   - No.6  月給の最低賃金         → 非同期。customer-form.tsx 側で API 叩いて setError
- *   - No.7  時給の最低賃金         → 同上
- *   - No.8  労基法34条 休憩時間    → superRefine
- *   - No.9  有期の更新上限の有無・内容 → superRefine
- *   - No.10 就業場所の変更範囲(2024改正) → .min(1)
- *   - No.11 業務の変更範囲(2024改正)    → .min(1)
+ * 労働条件通知書(労基法15条・施行規則5条)の法定記載事項に必要な項目のみを扱う。
+ * フリガナ・生年月日・性別・住所・電話・メール等は本ツール対象外
+ * (別の労務手続ツールで管理する前提で意図的に省いている)。
  *
- * No.6 / No.7(最低賃金)は都道府県マスタへのアクセスが必要なため、
- * 純粋 zod ではなく customer-form.tsx 側で /api/minimum-wage を叩き、
- * form.setError("basic_wage", ...) で反映する。送信ブロックは UI 側で
- * hasMinWageError フラグを持って disabled 制御する。
+ * Sheet05 の顧客側ルールを反映:
+ *   - 必須項目           → 各フィールドの .min(1) / enum
+ *   - 契約開始日 < 契約終了日 → superRefine
+ *   - 契約開始日 ≧ 入力時点 → 警告(UI側で注意喚起のみ、送信可)
+ *   - 月給/時給の最低賃金 → customer-form.tsx 側で /api/minimum-wage を叩き setError
+ *   - 労基法34条 休憩時間 → superRefine
+ *   - 有期の更新上限の有無・内容 → superRefine
+ *   - 就業場所/業務の変更範囲(2024改正) → .min(1)
  */
 
 export const employmentTypeValues = ["seishain", "keiyaku", "part"] as const;
 export type EmploymentType = (typeof employmentTypeValues)[number];
 
-export const genderValues = ["male", "female", "no_answer"] as const;
 export const contractPeriodValues = ["yes", "no"] as const;
 export const renewalTypeValues = ["auto", "maybe", "no"] as const;
 export const probationValues = ["yes", "no"] as const;
@@ -39,8 +39,14 @@ export const wageTypeValues = [
   "daily",
 ] as const;
 export const paymentMethodValues = ["bank_transfer", "cash"] as const;
-export const paymentCutoffValues = ["end", "15", "20", "other"] as const;
-export const remoteWorkValues = ["yes", "no"] as const;
+export const paymentCutoffValues = [
+  "end",
+  "10",
+  "15",
+  "20",
+  "25",
+  "other",
+] as const;
 export const hasAllowancesValues = ["yes", "no"] as const;
 export const holidayTypeValues = ["weekday", "shift", "other"] as const;
 export const socialInsuranceValues = [
@@ -60,24 +66,15 @@ export const weekdayValues = [
 ] as const;
 
 const baseClientFormSchema = z.object({
-  // 1. 労働者基本情報(No.1-8)
-  last_name: z.string().min(1, "姓を入力してください"),
-  first_name: z.string().min(1, "名を入力してください"),
-  last_name_kana: z.string().min(1, "姓(フリガナ)を入力してください"),
-  first_name_kana: z.string().min(1, "名(フリガナ)を入力してください"),
-  birth_date: z.string().min(1, "生年月日を入力してください"),
-  gender: z.enum(genderValues).optional(),
-  postal_code: z
+  // 1. 労働者氏名(労働条件通知書の法定記載事項に必要な最小項目)
+  last_name: z
     .string()
-    .min(1, "郵便番号を入力してください")
-    .regex(/^\d{7}$/, "7桁の半角数字で入力してください"),
-  address: z.string().min(1, "住所を入力してください"),
-  phone: z.string().min(1, "電話番号を入力してください"),
-  email: z
+    .min(1, "姓を入力してください")
+    .refine((v) => !/[\s\u3000]/.test(v), "姓と名は別々の欄に分けて入力してください"),
+  first_name: z
     .string()
-    .email("正しいメールアドレスを入力してください")
-    .optional()
-    .or(z.literal("")),
+    .min(1, "名を入力してください")
+    .refine((v) => !/[\s\u3000]/.test(v), "姓と名は別々の欄に分けて入力してください"),
 
   // 2. 雇用区分・契約期間(No.9-17)
   employment_type: z.enum(employmentTypeValues, {
@@ -99,7 +96,6 @@ const baseClientFormSchema = z.object({
   work_location_scope: z
     .string()
     .min(1, "就業場所の変更の範囲を入力してください(2024年改正で必須)"),
-  remote_work: z.enum(remoteWorkValues).optional(),
 
   // 4. 業務内容(No.21-22・2024年改正)
   job_description_initial: z
@@ -130,8 +126,30 @@ const baseClientFormSchema = z.object({
   allowances: z
     .array(
       z.object({
-        name: z.string(),
-        amount: z.union([z.coerce.number().int(), z.literal("")]).optional(),
+        allowance_type: z.enum(allowanceTypeValues),
+        allowance_name: z.string().default(""),
+        allowance_pattern: z.string().default(""),
+        allowance_amount: z.number().int().nonnegative().nullable().default(null),
+        allowance_percentage: z.number().nonnegative().nullable().default(null),
+        allowance_upper_limit: z
+          .number()
+          .int()
+          .nonnegative()
+          .nullable()
+          .default(null),
+        allowance_spouse_amount: z
+          .number()
+          .int()
+          .nonnegative()
+          .nullable()
+          .default(null),
+        allowance_child_amount: z
+          .number()
+          .int()
+          .nonnegative()
+          .nullable()
+          .default(null),
+        allowance_free_text: z.string().nullable().default(null),
       }),
     )
     .optional(),
@@ -149,9 +167,9 @@ const baseClientFormSchema = z.object({
   retirement_allowance: z.string().optional(),
 
   // 7. その他(No.42-45)
-  social_insurance: z
-    .array(z.enum(socialInsuranceValues))
-    .min(1, "社会保険を選択してください"),
+  // 労災保険は常時 ON(UI で disabled)。健康保険・厚生年金・雇用保険の
+  // 加入有無は事業主判断に委ねる(ブロックせず送信可)。
+  social_insurance: z.array(z.enum(socialInsuranceValues)),
   retirement_clause: z.string().optional(),
   retirement_age: z.string().optional(),
   remarks: z.string().optional(),
@@ -289,6 +307,78 @@ export const clientFormSchema = baseClientFormSchema.superRefine((v, ctx) => {
       message: "賃金締切日(その他)の内容を入力してください",
     });
   }
+
+  // -------------------------------------------------------------------
+  // 諸手当: has_allowances=yes の場合、各行の支給パターンと必須フィールド
+  // -------------------------------------------------------------------
+  if (v.has_allowances === "yes" && Array.isArray(v.allowances)) {
+    v.allowances.forEach((a, i) => {
+      const patterns = ALLOWANCE_PATTERNS[a.allowance_type as AllowanceType] ?? [];
+      const def = patterns.find((p) => p.id === a.allowance_pattern);
+      if (!def) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["allowances", i, "allowance_pattern"],
+          message: "支給パターンを選択してください",
+        });
+        return;
+      }
+      if (!a.allowance_name?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["allowances", i, "allowance_name"],
+          message: "手当名を入力してください",
+        });
+      }
+      for (const f of def.fields) {
+        if (f === "amount" && !((a.allowance_amount ?? 0) > 0)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["allowances", i, "allowance_amount"],
+            message: "金額を入力してください(0円不可)",
+          });
+        }
+        if (f === "percentage" && !((a.allowance_percentage ?? 0) > 0)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["allowances", i, "allowance_percentage"],
+            message: "割合(%)を入力してください",
+          });
+        }
+        if (f === "upper_limit" && !((a.allowance_upper_limit ?? 0) > 0)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["allowances", i, "allowance_upper_limit"],
+            message: "上限額を入力してください",
+          });
+        }
+        if (f === "spouse_amount" && !((a.allowance_spouse_amount ?? 0) > 0)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["allowances", i, "allowance_spouse_amount"],
+            message: "配偶者分の金額を入力してください",
+          });
+        }
+        if (f === "child_amount" && !((a.allowance_child_amount ?? 0) > 0)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["allowances", i, "allowance_child_amount"],
+            message: "子分の金額を入力してください",
+          });
+        }
+        if (f === "free_text" && !a.allowance_free_text?.trim()) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["allowances", i, "allowance_free_text"],
+            message: "内容を記入してください",
+          });
+        }
+      }
+    });
+  }
+
+  // 労基法56条・57条(年少者)チェックは birth_date を扱わなくなったため、
+  // 事務所側の目視確認に委ねる運用。
 });
 
 export type ClientFormValues = z.infer<typeof clientFormSchema>;
@@ -307,6 +397,33 @@ export function isContractStartInPast(
   if (Number.isNaN(start.getTime())) return false;
   return start < today;
 }
+
+/**
+ * 定年のプリセット(高年齢者雇用安定法に準拠)。
+ * 末尾の「その他(自由記述)」は UI 側の PresetOrOtherField で自動追加される。
+ */
+export const RETIREMENT_AGE_PRESETS = [
+  "満60歳に達した誕生日の月の末日",
+  "満65歳に達した誕生日の月の末日",
+  "満60歳に達した誕生日の月の末日(本人希望により65歳まで再雇用)",
+  "満60歳に達した誕生日の月の末日(希望者全員65歳まで継続雇用)",
+  "満65歳に達した誕生日の月の末日(希望者全員70歳まで継続雇用)",
+  "定めなし",
+] as const;
+export const DEFAULT_RETIREMENT_AGE: string =
+  "満60歳に達した誕生日の月の末日(本人希望により65歳まで再雇用)";
+
+/**
+ * 退職に関する事項のプリセット(就業規則参照型を基本とする)。
+ * 末尾の「その他(自由記述)」は UI 側の PresetOrOtherField で自動追加される。
+ */
+export const RETIREMENT_CLAUSE_PRESETS = [
+  "解雇の事由及び手続、その他詳細は就業規則の定めによる",
+  "解雇の事由・手続、自己都合退職の手続、その他詳細は当社就業規則の定めによる",
+  "当社就業規則および給与規程の定めによる",
+] as const;
+export const DEFAULT_RETIREMENT_CLAUSE: string =
+  "解雇の事由及び手続、その他詳細は就業規則の定めによる";
 
 /**
  * template_name から雇用形態・有期/無期のデフォルトを推定。

@@ -103,9 +103,103 @@ function weeklyScheduledHours(client: ClientFormValues): number | null {
   return dailyHours * workingDaysPerWeek;
 }
 
+export type OfficeValidationContext = {
+  /** contract_requests.company_address(値の妥当性警告に使用) */
+  company_address?: string;
+};
+
+/**
+ * 業務内容・就業場所などの自由記述欄で「正当な短文回答」として
+ * 文字数・意味不明チェックをスキップするホワイトリスト。
+ *
+ * これらはいずれも実務で頻出する正当な回答のため、
+ * 2文字未満・意味不明ヒューリスティックの対象外とする。
+ */
+const SHORT_ANSWER_WHITELIST = new Set<string>([
+  "なし",
+  "変更なし",
+  "異動なし",
+  "転勤なし",
+  "該当なし",
+  "特になし",
+  "本社のみ",
+  "就業場所に同じ",
+  "雇入れ時と同じ",
+]);
+
+function isWhitelistedShortAnswer(raw: string): boolean {
+  return SHORT_ANSWER_WHITELIST.has(raw.trim());
+}
+
+const KEYBOARD_SEQUENCES = [
+  "qwertyuiop",
+  "asdfghjkl",
+  "zxcvbnm",
+  "1234567890",
+  "abcdefghijklmnopqrstuvwxyz",
+  "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん",
+];
+
+/**
+ * 日本語の必須記載欄に対して「意味不明な入力」を検知するヒューリスティック。
+ * ホワイトリストや文字数チェックは呼び出し側で別途適用すること。
+ *
+ * 判定基準:
+ *   - 半角英数字のみで構成されている("sdf", "das", "123" など)
+ *   - 半角カナのみ("ｻｼｽｾｿ")
+ *   - 全角英数字のみ("ｆｓｄ", "ｄｓふぁ"のうち英数字部分だけ、"１２３ＡＢＣ" など)
+ *   - 半角英数字と全角英数字が混在し、日本語(CJK/かな)を含まない("ｄsｆ" 等)
+ *   - 半角カナ or 半角英字 と 日本語(CJK/ひらがな/カタカナ)が混在("さｆ", "ふぁｓｄ")
+ *   - 同一文字の連続4文字以上("ああああ", "aaaa")
+ *   - 5文字以上のキーボード/五十音配列連続("asdfg", "qwerty", "あいうえお")
+ */
+function looksMeaninglessInput(raw: string): boolean {
+  const s = raw.trim();
+  if (s.length === 0) return false;
+
+  // 半角英数字のみ / 半角カナのみ / 全角英数字のみ
+  if (/^[A-Za-z0-9]+$/.test(s)) return true;
+  if (/^[\uFF66-\uFF9F]+$/.test(s)) return true;
+  if (/^[\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19]+$/.test(s)) return true;
+
+  const HALF_ALNUM = /[A-Za-z0-9]/;
+  const FULL_ALNUM = /[\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19]/;
+  const HALF_KANA = /[\uFF66-\uFF9F]/;
+  const CJK = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]/;
+
+  // 半角英数字 × 全角英数字 の混在で日本語を含まない("ｄsｆ" 等)
+  if (
+    HALF_ALNUM.test(s) &&
+    FULL_ALNUM.test(s) &&
+    !CJK.test(s) &&
+    !HALF_KANA.test(s)
+  ) {
+    return true;
+  }
+
+  // 半角英字/半角カナ × 日本語 の混在("さｆ", "ふぁｓｄ")
+  const HALF = /[A-Za-z\uFF66-\uFF9F]/;
+  if (HALF.test(s) && CJK.test(s)) return true;
+
+  if (/^(.)\1{3,}$/.test(s)) return true;
+
+  if (s.length >= 5) {
+    const lower = s.toLowerCase();
+    for (const seq of KEYBOARD_SEQUENCES) {
+      if (seq.includes(lower) || seq.includes(s)) return true;
+    }
+  }
+
+  return false;
+}
+
+const MEANINGLESS_DETAIL =
+  "入力内容が意味のある日本語として認識できません。具体的な内容を記載してください。";
+
 export function validateOfficeInput(
   client: ClientFormValues | null,
   office: OfficeInputValues,
+  ctx?: OfficeValidationContext,
 ): OfficeValidationResult {
   const issues: OfficeValidationIssue[] = [];
   let fixedOvertimeCheck: FixedOvertimeCheck | null = null;
@@ -171,9 +265,9 @@ export function validateOfficeInput(
     if (!office.fixed_overtime_name?.trim()) {
       issues.push({
         code: "12a",
-        severity: "warning",
+        severity: "error",
         title: "固定残業代の名称が未入力です",
-        detail: "手当名を明記してください(例: 固定残業手当)。",
+        detail: "固定残業代ありの場合、名称は必須です(例: 固定残業手当)。",
       });
     }
     if (!office.fixed_overtime_excess_notice) {
@@ -214,8 +308,9 @@ export function validateOfficeInput(
     } else if (hours === null || amount === null) {
       issues.push({
         code: "12c",
-        severity: "warning",
+        severity: "error",
         title: "固定残業代の時間数・金額が未入力です",
+        detail: "固定残業代ありの場合、時間数と金額は必須です。",
       });
     }
 
@@ -281,6 +376,146 @@ export function validateOfficeInput(
       }
     }
   }
+
+  // --- 値域の妥当性警告(typo 検知・誤入力対策) ---
+  if (client) {
+    // 基本賃金: 500万円超は「単位違い(年額入力)」の可能性が高い
+    if (
+      typeof client.basic_wage === "number" &&
+      client.basic_wage > 5_000_000
+    ) {
+      const unit =
+        client.wage_type === "hourly"
+          ? "時給"
+          : client.wage_type === "daily"
+            ? "日給"
+            : "月給";
+      issues.push({
+        code: "V-wage",
+        severity: "warning",
+        title: "基本賃金の金額が異常に高い可能性があります",
+        detail: `${unit}として ${client.basic_wage.toLocaleString()} 円が入力されています。桁や単位(年額/月額)をご確認ください。`,
+      });
+    }
+
+    // --- 労基法15条・施行規則5条の絶対的明示事項(未入力・意味不明はブロック) ---
+
+    // 業務内容(雇入れ直後)
+    const jobInit = client.job_description_initial?.trim() ?? "";
+    if (jobInit.length === 0) {
+      issues.push({
+        code: "V-job-empty",
+        severity: "error",
+        title: "業務内容(雇入れ直後)が未入力です",
+        detail: "労基法15条・施行規則5条の絶対的明示事項。顧客に入力を依頼してください。",
+      });
+    } else if (!isWhitelistedShortAnswer(jobInit)) {
+      if (jobInit.length < 2) {
+        issues.push({
+          code: "V-job-short",
+          severity: "error",
+          title: "業務内容の記載が短すぎます",
+          detail: `「${jobInit}」のみが入力されています。労基法15条の明示義務を満たすため、2文字以上で具体的に記載してください。`,
+        });
+      } else if (looksMeaninglessInput(jobInit)) {
+        issues.push({
+          code: "V-job-meaningless",
+          severity: "error",
+          title: "業務内容が意味のある日本語になっていません",
+          detail: `「${jobInit}」が入力されています。${MEANINGLESS_DETAIL}`,
+        });
+      }
+    }
+
+    // 就業場所(雇入れ直後)
+    const locInit = client.work_location_initial?.trim() ?? "";
+    if (locInit.length === 0) {
+      issues.push({
+        code: "V-loc-empty",
+        severity: "error",
+        title: "就業場所(雇入れ直後)が未入力です",
+        detail: "労基法15条・施行規則5条の絶対的明示事項。顧客に入力を依頼してください。",
+      });
+    } else if (!isWhitelistedShortAnswer(locInit)) {
+      if (locInit.length < 2) {
+        issues.push({
+          code: "V-loc-short",
+          severity: "error",
+          title: "就業場所(雇入れ直後)の記載が短すぎます",
+          detail: `「${locInit}」のみが入力されています。事業所名・住所など2文字以上で具体的に記載してください。`,
+        });
+      } else if (looksMeaninglessInput(locInit)) {
+        issues.push({
+          code: "V-loc-meaningless",
+          severity: "error",
+          title: "就業場所(雇入れ直後)が意味のある日本語になっていません",
+          detail: `「${locInit}」が入力されています。${MEANINGLESS_DETAIL}`,
+        });
+      }
+    }
+
+    // 就業場所(変更の範囲・2024年改正) — No.17a で既に error チェック済み。
+    // 「なし」「本社のみ」等の正当な短文回答はホワイトリストで許容。
+    const locScope = client.work_location_scope?.trim() ?? "";
+    if (locScope.length > 0 && !isWhitelistedShortAnswer(locScope)) {
+      if (locScope.length < 2) {
+        issues.push({
+          code: "V-loc-scope-short",
+          severity: "warning",
+          title: "就業場所(変更の範囲)の記載が短すぎる可能性があります",
+          detail: `「${locScope}」のみが入力されています。「なし」等の正当な回答でなければ、具体的な範囲を記載してください。`,
+        });
+      } else if (looksMeaninglessInput(locScope)) {
+        issues.push({
+          code: "V-loc-scope-meaningless",
+          severity: "warning",
+          title: "就業場所(変更の範囲)が意味のある日本語になっていません",
+          detail: `「${locScope}」が入力されています。${MEANINGLESS_DETAIL}`,
+        });
+      }
+    }
+
+  }
+
+  // 会社所在地の妥当性(警告)
+  if (ctx?.company_address) {
+    const addr = ctx.company_address.trim();
+    if (addr.length > 0 && addr.length < 7) {
+      issues.push({
+        code: "V-addr-len",
+        severity: "warning",
+        title: "会社所在地が短すぎる可能性があります",
+        detail: `「${addr}」が入力されています。都道府県・市区町村・番地まで含まれているか確認してください。`,
+      });
+    }
+    if (addr.length > 0 && !/[0-90-9]/.test(addr)) {
+      issues.push({
+        code: "V-addr-num",
+        severity: "warning",
+        title: "会社所在地に番地の数字が含まれていない可能性があります",
+        detail: "丁目・番地の記載をご確認ください。",
+      });
+    }
+  }
+
+  // --- 退職関連 ---
+  // 定年(正社員)・退職事項は未入力時、docx 生成時に既定文言
+  // (満60歳の誕生月末日 / 就業規則の定めによる)で自動補完するため、
+  // バリデーションでのエラー/警告は発生させない。
+  // 個別の定めがある場合は顧客入力タブから訂正する運用。
+
+  if (!office.self_retirement_notice_period?.trim()) {
+    issues.push({
+      code: "V-self-retire",
+      severity: "warning",
+      title: "自己都合退職の予告期間が未選択です",
+      detail:
+        "民法627条は原則2週間前の申出。就業規則で別途定めがある場合はそれを選択してください。",
+    });
+  }
+
+  // 労基法56条・57条(年少者)の自動チェックは birth_date を扱わなくなったため削除。
+  // 社労士の目視確認に委ねる。
 
   return {
     issues,

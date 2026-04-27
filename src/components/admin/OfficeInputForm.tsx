@@ -44,6 +44,13 @@ type Props = {
   status: ContractRequestStatus;
   initialValues: OfficeInputValues;
   client: ClientFormValues | null;
+  /**
+   * 相談窓口 (consultation_contact) のデフォルト値。
+   * 未入力の依頼に対して初期表示として使用(会社代表者名を想定)。
+   */
+  defaultConsultationContact?: string;
+  /** contract_requests.company_address(妥当性警告用) */
+  companyAddress?: string;
 };
 
 function isDeepEqual(a: unknown, b: unknown): boolean {
@@ -61,13 +68,21 @@ export function OfficeInputForm({
   status,
   initialValues,
   client,
+  defaultConsultationContact,
+  companyAddress,
 }: Props) {
-  const [values, setValues] = useState<OfficeInputValues>(
-    () => ({ ...emptyOfficeInput(), ...initialValues }),
-  );
-  const [saved, setSaved] = useState<OfficeInputValues>(
-    () => ({ ...emptyOfficeInput(), ...initialValues }),
-  );
+  // 既存の office_input に値が無い場合のみ、会社代表者名を相談窓口のデフォルトとして充填。
+  // saved にも同じ値を入れて、ロード直後は dirty=false として扱う(未編集なら保存不要)。
+  const merged = useMemo<OfficeInputValues>(() => {
+    const base = { ...emptyOfficeInput(), ...initialValues };
+    if (!base.consultation_contact && defaultConsultationContact) {
+      base.consultation_contact = defaultConsultationContact;
+    }
+    return base;
+  }, [initialValues, defaultConsultationContact]);
+
+  const [values, setValues] = useState<OfficeInputValues>(() => merged);
+  const [saved, setSaved] = useState<OfficeInputValues>(() => merged);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [savePending, startSave] = useTransition();
   const [statusPending, startStatusChange] = useTransition();
@@ -88,8 +103,8 @@ export function OfficeInputForm({
   }, [dirty]);
 
   const validation = useMemo(
-    () => validateOfficeInput(client, values),
-    [client, values],
+    () => validateOfficeInput(client, values, { company_address: companyAddress }),
+    [client, values, companyAddress],
   );
 
   function update<K extends keyof OfficeInputValues>(
@@ -150,7 +165,34 @@ export function OfficeInputForm({
           );
           return;
         }
-        setDocxMessage("docx を生成しました。");
+        if (data?.url) {
+          // 署名URLを fetch して blob として取得 → a.download でファイル名付与。
+          // 直接 a.href = signedUrl だと Content-Disposition が優先されて
+          // URLエンコード済のファイル名が表示されてしまうため、blob 経由にする。
+          try {
+            const fileRes = await fetch(data.url);
+            if (!fileRes.ok) throw new Error(`download failed: ${fileRes.status}`);
+            const blob = await fileRes.blob();
+            const objectUrl = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = objectUrl;
+            a.download = data.filename ?? "労働条件通知書.docx";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(objectUrl);
+            setDocxMessage(
+              `docx を生成しました: ${data.filename ?? "労働条件通知書.docx"}`,
+            );
+          } catch (e) {
+            console.error(e);
+            setDocxMessage(
+              "docx は生成されましたが、ダウンロードに失敗しました。時間を置いて再度お試しください。",
+            );
+          }
+        } else {
+          setDocxMessage("docx を生成しました。");
+        }
       } catch (e) {
         console.error(e);
         setDocxMessage("通信エラーが発生しました。");
@@ -472,6 +514,63 @@ export function OfficeInputForm({
         </FormSection>
       )}
 
+      {/* Section 7. 契約書記載の補助情報(docx 生成用) */}
+      <FormSection title="7. 契約書記載の補助情報(docx生成用)">
+        <Field label="時間外労働の有無" hint="Sheet06『overtime_type』タグに反映">
+          <Select
+            value={values.overtime_type ?? ""}
+            onValueChange={(v) =>
+              update("overtime_type", (v || undefined) as typeof values.overtime_type)
+            }
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="-- 選択 --" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="yes">有</SelectItem>
+              <SelectItem value="no">無</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <Field
+          label="相談窓口(所属部署・担当者・連絡先)"
+          hint="2024年4月改正で明示推奨。例: 人事部 労務担当 03-xxxx-xxxx"
+        >
+          <Textarea
+            value={values.consultation_contact ?? ""}
+            onChange={(e) => update("consultation_contact", e.target.value)}
+            rows={2}
+          />
+        </Field>
+
+        <Field
+          label="就業規則の備付場所"
+          hint="例: 本社事務所キャビネット / 社内イントラ"
+        >
+          <Input
+            value={values.work_rules_location ?? ""}
+            onChange={(e) => update("work_rules_location", e.target.value)}
+          />
+        </Field>
+
+        <SelfRetirementNoticePeriodField
+          value={values.self_retirement_notice_period ?? ""}
+          onChange={(v) => update("self_retirement_notice_period", v)}
+        />
+
+        <Field
+          label="休暇に関する事項(年休以外)"
+          hint="慶弔休暇・特別休暇・産前産後・育休等の規定を要約"
+        >
+          <Textarea
+            value={values.leave_clause ?? ""}
+            onChange={(e) => update("leave_clause", e.target.value)}
+            rows={3}
+          />
+        </Field>
+      </FormSection>
+
       {/* Section 6. 最終チェック + 内部メモ */}
       <FormSection title="6. 最終チェック・納品メモ">
         <Field
@@ -518,6 +617,11 @@ export function OfficeInputForm({
               statusPending ||
               status === "delivered" ||
               !validation.canGenerate
+            }
+            title={
+              !validation.canGenerate
+                ? "エラー(生成ブロック)が残っているため納品済にできません"
+                : undefined
             }
           >
             納品済にする
@@ -591,6 +695,79 @@ function Field({
       {children}
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
     </div>
+  );
+}
+
+const SELF_RETIREMENT_PRESETS = [
+  "退職希望日の14日前",
+  "退職希望日の1ヶ月前",
+  "退職希望日の2ヶ月前",
+] as const;
+
+function SelfRetirementNoticePeriodField({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const isPreset = (SELF_RETIREMENT_PRESETS as readonly string[]).includes(
+    value,
+  );
+  // value が非プリセットかつ非空 → 自動的に「その他」モード。
+  // value が空 or プリセット → 基本は preset モードだが、
+  // ユーザーが明示的に「その他」を選んだ場合は otherSticky で保持する。
+  const [otherSticky, setOtherSticky] = useState<boolean>(
+    !isPreset && value !== "",
+  );
+  const mode: "preset" | "other" =
+    !isPreset && value !== "" ? "other" : otherSticky ? "other" : "preset";
+  const selectValue =
+    mode === "other"
+      ? "__other__"
+      : isPreset
+        ? value
+        : undefined;
+
+  return (
+    <Field
+      label="自己都合退職の予告期間"
+      hint="民法627条では2週間前の申出が原則。就業規則で別途定めがある場合はそれに従う。"
+    >
+      <Select
+        value={selectValue}
+        onValueChange={(v) => {
+          if (v === "__other__") {
+            setOtherSticky(true);
+            // プリセット値が入っていたらクリアして自由記述欄に切り替える
+            if (isPreset) onChange("");
+          } else {
+            setOtherSticky(false);
+            onChange(v);
+          }
+        }}
+      >
+        <SelectTrigger>
+          <SelectValue placeholder="-- 選択 --" />
+        </SelectTrigger>
+        <SelectContent>
+          {SELF_RETIREMENT_PRESETS.map((p) => (
+            <SelectItem key={p} value={p}>
+              {p}
+            </SelectItem>
+          ))}
+          <SelectItem value="__other__">その他(自由記述)</SelectItem>
+        </SelectContent>
+      </Select>
+      {mode === "other" && (
+        <Input
+          className="mt-2"
+          placeholder="例: 退職希望日の30日前"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </Field>
   );
 }
 

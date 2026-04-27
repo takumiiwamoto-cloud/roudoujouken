@@ -4,6 +4,7 @@ import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { clientFormSchema } from "@/lib/validations/client-form";
 import { notifyOfficeOfSubmission } from "@/lib/email/notify-office";
+import { withAllowanceDescriptions } from "@/lib/allowances";
 
 /**
  * POST /api/submit
@@ -101,12 +102,23 @@ export async function POST(req: Request) {
   }
   const values = validated.data;
 
+  // has_allowances='no' の場合、保存時に allowances 配列をクリア(UI 上は非表示だが
+  // state に残った古い入力が jsonb に混入するのを防ぐ)。
+  // 'yes' の場合は各行に allowance_description(docx 差し込み用)を付与。
+  const normalizedValues = {
+    ...values,
+    allowances:
+      values.has_allowances === "yes"
+        ? withAllowanceDescriptions(values.allowances ?? [])
+        : [],
+  };
+
   // 4. DB 保存 & status 更新
   //    楽観的な二重送信防止: status='pending' の行に限って UPDATE する
   const { data: updated, error: updateError } = await supabase
     .from("contract_requests")
     .update({
-      client_input: values,
+      client_input: normalizedValues,
       status: "submitted",
       submitted_at: new Date().toISOString(),
     })

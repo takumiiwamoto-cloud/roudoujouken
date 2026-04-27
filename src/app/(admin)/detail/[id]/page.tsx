@@ -2,8 +2,8 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 
 import { AdminShell } from "@/components/admin/admin-shell";
-import { ClientDataView } from "@/components/admin/ClientDataView";
 import { OfficeInputForm } from "@/components/admin/OfficeInputForm";
+import { CustomerForm } from "@/app/(public)/form/[token]/customer-form";
 import {
   Tabs,
   TabsContent,
@@ -27,7 +27,7 @@ import type { ContractRequestRow } from "@/lib/supabase/types";
  *
  * プロンプト4-C:
  *   - 上部: ステータス・会社情報・従業員氏名サマリ
- *   - タブ1: 顧客入力内容(ClientDataView、読み取り専用)
+ *   - タブ1: 顧客入力内容(CustomerForm を admin-edit モードで再利用し編集可能)
  *   - タブ2: 事務所側追加入力(OfficeInputForm)
  *   - 下部: OfficeInputForm 内に 保存 / ステータス変更 / docx 生成
  */
@@ -78,7 +78,7 @@ export default async function AdminRequestDetailPage({
   const client = toClientFormValues(data.client_input);
   const office = toOfficeInputValues(data.office_input);
   const employeeName = client
-    ? `${client.last_name ?? ""} ${client.first_name ?? ""}`.trim()
+    ? [client.last_name, client.first_name].filter((s) => !!s?.trim()).join("　")
     : "";
 
   return (
@@ -145,15 +145,51 @@ export default async function AdminRequestDetailPage({
               <TabsTrigger value="client">顧客入力内容</TabsTrigger>
               <TabsTrigger value="office">事務所側追加入力</TabsTrigger>
             </TabsList>
-            <TabsContent value="client" className="mt-4">
-              <ClientDataView client={client} />
+            {/* 両タブを常にマウント(forceMount)することで、
+                タブ切替で OfficeInputForm の入力 state がリセットされないようにする。
+                非アクティブタブは Radix が data-state="inactive" を付与するので、
+                data-[state=inactive]:hidden で非表示にする。 */}
+            <TabsContent
+              value="client"
+              className="mt-4 data-[state=inactive]:hidden"
+              forceMount
+            >
+              {client ? (
+                <div className="rounded-lg border bg-card p-4 md:p-5">
+                  <p className="mb-3 text-xs text-muted-foreground">
+                    顧客入力内容の直接編集モード。バリデーションエラーは、該当項目を修正して「保存」してください。保存後、事務所側追加入力タブで docx 生成に進めます。
+                  </p>
+                  <CustomerForm
+                    request={{
+                      id: data.id,
+                      access_token: data.access_token,
+                      company_name: data.company_name,
+                      company_address: data.company_address,
+                      representative_name: data.representative_name,
+                      template_name: data.template_name,
+                    }}
+                    mode="admin-edit"
+                    initialValues={client}
+                  />
+                </div>
+              ) : (
+                <div className="rounded-lg border bg-card p-6 text-sm text-muted-foreground">
+                  顧客はまだフォームを送信していません。送信後に内容の確認・編集ができます。
+                </div>
+              )}
             </TabsContent>
-            <TabsContent value="office" className="mt-4">
+            <TabsContent
+              value="office"
+              className="mt-4 data-[state=inactive]:hidden"
+              forceMount
+            >
               <OfficeInputForm
                 requestId={data.id}
                 status={data.status}
                 initialValues={office}
                 client={client}
+                defaultConsultationContact={data.representative_name}
+                companyAddress={data.company_address}
               />
             </TabsContent>
           </Tabs>

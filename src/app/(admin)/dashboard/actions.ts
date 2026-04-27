@@ -7,13 +7,15 @@ import { requireUser } from "@/lib/supabase/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
- * 依頼削除(pending のみ許可)
+ * 依頼削除(delivered 以外を許可)
  *
  * 方針:
- *   - status='pending' の行だけ物理削除(URL発行後、顧客入力が始まる前)
- *   - submitted 以降は顧客の入力データが入っているので誤削除防止のため不可
- *   - DELETE 時に WHERE status='pending' を付け、競合時は変化なしで返す
+ *   - pending / submitted / reviewed は物理削除可(誤発行・入力やり直し対応)
+ *   - delivered(納品済)は記録保持のため削除不可
+ *   - DELETE 時に WHERE status IN (...) を付け、競合時は変化なしで返す
  */
+
+const DELETABLE_STATUSES = ["pending", "submitted", "reviewed"] as const;
 
 const deleteSchema = z.object({
   id: z.string().uuid("不正なIDです"),
@@ -38,7 +40,7 @@ export async function deleteRequestAction(
     .from("contract_requests")
     .delete()
     .eq("id", parsed.data.id)
-    .eq("status", "pending")
+    .in("status", DELETABLE_STATUSES as unknown as string[])
     .select("id")
     .maybeSingle();
 
@@ -49,7 +51,7 @@ export async function deleteRequestAction(
   if (!data) {
     return {
       ok: false,
-      error: "この依頼は既に顧客入力が進んでいるため削除できません。",
+      error: "納品済の依頼は削除できません。",
     };
   }
 

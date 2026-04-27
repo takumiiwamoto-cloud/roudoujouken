@@ -206,10 +206,11 @@ export default async function AdminDashboardPage({
                       >
                         <Link href={`/detail/${row.id}`}>詳細</Link>
                       </Button>
-                      {row.status === "pending" && (
+                      {row.status !== "delivered" && (
                         <DeleteButton
                           id={row.id}
                           companyName={row.company_name}
+                          status={row.status}
                         />
                       )}
                     </div>

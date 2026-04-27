@@ -5,14 +5,31 @@ import { useRouter } from "next/navigation";
 import { useForm, useFieldArray, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 
+import { saveClientInputAction } from "@/app/(admin)/detail/[id]/actions";
 import {
   clientFormSchema,
   deriveDefaultsFromTemplate,
   isContractStartInPast,
+  RETIREMENT_AGE_PRESETS,
+  RETIREMENT_CLAUSE_PRESETS,
+  DEFAULT_RETIREMENT_AGE,
+  DEFAULT_RETIREMENT_CLAUSE,
   type ClientFormValues,
 } from "@/lib/validations/client-form";
 import {
+  ALLOWANCE_PATTERNS,
+  ALLOWANCE_TYPE_LABELS,
+  allowanceTypeValues,
+  buildAllowanceDescription,
+  emptyAllowanceItem,
+  findPatternDef,
+  normalizeAllowanceEntry,
+  type AllowanceItem,
+  type AllowanceType,
+} from "@/lib/allowances";
+import {
   calcMonthlyWorkHours,
+  calcNetWorkMinutes,
   checkHourlyWage,
   checkMonthlyWage,
   estimateAnnualHolidays,
@@ -87,6 +104,456 @@ function Req({ kaisei = false }: { kaisei?: boolean }) {
     <span className={kaisei ? "text-amber-600" : "text-destructive"}>
       {kaisei ? " *(2024年改正)" : " *"}
     </span>
+  );
+}
+
+/**
+ * プリセット選択 + 「自由記述」で自由入力に切り替わる汎用フィールド。
+ * 値はそのままプリセット文字列または自由記述の文字列として保存される(schema 変更不要)。
+ */
+function PresetOrOtherField({
+  value,
+  onChange,
+  presets,
+  placeholder = "-- 選択 --",
+  otherLabel = "自由記述",
+  otherPlaceholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  presets: readonly string[];
+  placeholder?: string;
+  otherLabel?: string;
+  otherPlaceholder?: string;
+}) {
+  const isPreset = presets.includes(value);
+  const [otherSticky, setOtherSticky] = useState<boolean>(
+    !isPreset && value !== "",
+  );
+  const mode: "preset" | "other" =
+    !isPreset && value !== "" ? "other" : otherSticky ? "other" : "preset";
+  const selectValue =
+    mode === "other" ? "__other__" : isPreset ? value : undefined;
+
+  return (
+    <div className="space-y-2">
+      <Select
+        value={selectValue}
+        onValueChange={(v) => {
+          if (v === "__other__") {
+            setOtherSticky(true);
+            if (isPreset) onChange("");
+          } else {
+            setOtherSticky(false);
+            onChange(v);
+          }
+        }}
+      >
+        <SelectTrigger>
+          <SelectValue placeholder={placeholder} />
+        </SelectTrigger>
+        <SelectContent>
+          {presets.map((p) => (
+            <SelectItem key={p} value={p}>
+              {p}
+            </SelectItem>
+          ))}
+          <SelectItem value="__other__">{otherLabel}</SelectItem>
+        </SelectContent>
+      </Select>
+      {mode === "other" && (
+        <Textarea
+          rows={2}
+          placeholder={otherPlaceholder}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </div>
+  );
+}
+
+const SALARY_INCREASE_PRESETS = [
+  "有(年1回、勤務成績等を考慮して決定)",
+  "有(昇給規程による)",
+  "有(業績等により行わない場合あり)",
+  "無",
+] as const;
+
+const BONUS_PRESETS = [
+  "有(年2回、業績により支給)",
+  "有(賞与規程による)",
+  "有(5月、12月/業績により支給時期変更等あり)",
+  "無",
+] as const;
+
+const RETIREMENT_ALLOWANCE_PRESETS = [
+  "有(就業規則による)",
+  "有(退職金規程による)",
+  "無",
+  "業績による",
+] as const;
+
+/**
+ * 諸手当エディタ(折りたたみ式の1行カード)。
+ *   - 種別(Select) → パターン(Select) → 必要項目 を動的表示
+ *   - 折りたたみ時は手当名と description のサマリを表示
+ */
+function AllowanceEditorCard({
+  idx,
+  form,
+  isOpen,
+  onExpand,
+  onCollapse,
+  onRemove,
+}: {
+  idx: number;
+  form: ReturnType<typeof useForm<ClientFormValues>>;
+  isOpen: boolean;
+  onExpand: () => void;
+  onCollapse: () => void;
+  onRemove: () => void;
+}) {
+  const item = form.watch(`allowances.${idx}`) as AllowanceItem | undefined;
+  if (!item) return null;
+  const patternDef = findPatternDef(item.allowance_type, item.allowance_pattern);
+  const description = buildAllowanceDescription(item);
+  const errors = (form.formState.errors.allowances as unknown as
+    | Array<Record<string, { message?: string }> | undefined>
+    | undefined)?.[idx];
+
+  function updateType(newType: AllowanceType) {
+    form.setValue(`allowances.${idx}.allowance_type`, newType, {
+      shouldValidate: false,
+    });
+    // 名称が既存のラベルに一致していた場合のみ自動追従(ユーザー編集済みは尊重)
+    const current = form.getValues(`allowances.${idx}.allowance_name`);
+    const prevLabels = Object.values(ALLOWANCE_TYPE_LABELS);
+    if (!current || prevLabels.includes(current)) {
+      form.setValue(
+        `allowances.${idx}.allowance_name`,
+        ALLOWANCE_TYPE_LABELS[newType],
+      );
+    }
+    form.setValue(`allowances.${idx}.allowance_pattern`, "");
+    form.setValue(`allowances.${idx}.allowance_amount`, null);
+    form.setValue(`allowances.${idx}.allowance_percentage`, null);
+    form.setValue(`allowances.${idx}.allowance_upper_limit`, null);
+    form.setValue(`allowances.${idx}.allowance_spouse_amount`, null);
+    form.setValue(`allowances.${idx}.allowance_child_amount`, null);
+    form.setValue(`allowances.${idx}.allowance_free_text`, null);
+  }
+
+  function updatePattern(newPattern: string) {
+    form.setValue(`allowances.${idx}.allowance_pattern`, newPattern, {
+      shouldValidate: false,
+    });
+    form.setValue(`allowances.${idx}.allowance_amount`, null);
+    form.setValue(`allowances.${idx}.allowance_percentage`, null);
+    form.setValue(`allowances.${idx}.allowance_upper_limit`, null);
+    form.setValue(`allowances.${idx}.allowance_spouse_amount`, null);
+    form.setValue(`allowances.${idx}.allowance_child_amount`, null);
+    form.setValue(`allowances.${idx}.allowance_free_text`, null);
+  }
+
+  if (!isOpen) {
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-md border bg-card p-3">
+        <div className="min-w-0 flex-1 text-sm">
+          <div className="truncate">
+            <b>{item.allowance_name || ALLOWANCE_TYPE_LABELS[item.allowance_type]}</b>
+            {" — "}
+            <span className="text-muted-foreground">
+              {description || "(支給パターン未設定)"}
+            </span>
+          </div>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={onExpand}>
+            編集
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onRemove}
+            className="text-destructive hover:bg-destructive/10"
+          >
+            削除
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  const patternOptions = ALLOWANCE_PATTERNS[item.allowance_type] ?? [];
+
+  return (
+    <div className="space-y-3 rounded-md border bg-card p-3">
+      <div className="grid gap-3 md:grid-cols-2">
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">手当種別</Label>
+          <Select
+            value={item.allowance_type}
+            onValueChange={(v) => updateType(v as AllowanceType)}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {allowanceTypeValues.map((t) => (
+                <SelectItem key={t} value={t}>
+                  {ALLOWANCE_TYPE_LABELS[t]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">手当名(docx 表示)</Label>
+          <Input
+            value={item.allowance_name ?? ""}
+            onChange={(e) =>
+              form.setValue(
+                `allowances.${idx}.allowance_name`,
+                e.target.value,
+              )
+            }
+            placeholder="例: 通勤手当"
+          />
+          {errors?.allowance_name?.message && (
+            <p className="text-xs text-destructive">
+              {errors.allowance_name.message}
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-1">
+        <Label className="text-xs text-muted-foreground">支給パターン</Label>
+        <Select
+          value={item.allowance_pattern || undefined}
+          onValueChange={(v) => updatePattern(v)}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="-- 支給パターンを選択 --" />
+          </SelectTrigger>
+          <SelectContent>
+            {patternOptions.map((p) => (
+              <SelectItem key={p.id} value={p.id}>
+                {p.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {errors?.allowance_pattern?.message && (
+          <p className="text-xs text-destructive">
+            {errors.allowance_pattern.message}
+          </p>
+        )}
+      </div>
+
+      {patternDef?.fields.includes("amount") && (
+        <AmountField
+          label="月額(円)"
+          name={`allowances.${idx}.allowance_amount`}
+          form={form}
+          errorMessage={errors?.allowance_amount?.message}
+        />
+      )}
+      {patternDef?.fields.includes("percentage") && (
+        <AmountField
+          label="割合(%)"
+          name={`allowances.${idx}.allowance_percentage`}
+          form={form}
+          step="0.1"
+          errorMessage={errors?.allowance_percentage?.message}
+        />
+      )}
+      {patternDef?.fields.includes("upper_limit") && (
+        <AmountField
+          label="上限額(円)"
+          name={`allowances.${idx}.allowance_upper_limit`}
+          form={form}
+          errorMessage={errors?.allowance_upper_limit?.message}
+        />
+      )}
+      {patternDef?.fields.includes("spouse_amount") && (
+        <AmountField
+          label="配偶者分(円)"
+          name={`allowances.${idx}.allowance_spouse_amount`}
+          form={form}
+          errorMessage={errors?.allowance_spouse_amount?.message}
+        />
+      )}
+      {patternDef?.fields.includes("child_amount") && (
+        <AmountField
+          label="子1人あたり(円)"
+          name={`allowances.${idx}.allowance_child_amount`}
+          form={form}
+          errorMessage={errors?.allowance_child_amount?.message}
+        />
+      )}
+      {patternDef?.fields.includes("free_text") && (
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">支給条件</Label>
+          <Textarea
+            rows={2}
+            placeholder={patternDef.freeTextPlaceholder}
+            value={item.allowance_free_text ?? ""}
+            onChange={(e) =>
+              form.setValue(
+                `allowances.${idx}.allowance_free_text`,
+                e.target.value,
+                { shouldValidate: false },
+              )
+            }
+          />
+          {errors?.allowance_free_text?.message && (
+            <p className="text-xs text-destructive">
+              {errors.allowance_free_text.message}
+            </p>
+          )}
+        </div>
+      )}
+
+      {patternDef && (
+        <div className="rounded-md border bg-muted/40 p-2 text-xs">
+          プレビュー: <b>{item.allowance_name || "(手当名)"}</b>{" — "}
+          <span>{description || "(入力中)"}</span>
+        </div>
+      )}
+
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="outline" size="sm" onClick={onCollapse}>
+          閉じる
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onRemove}
+          className="text-destructive hover:bg-destructive/10"
+        >
+          削除
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function AmountField({
+  label,
+  name,
+  form,
+  step,
+  errorMessage,
+}: {
+  label: string;
+  name: `allowances.${number}.${
+    | "allowance_amount"
+    | "allowance_percentage"
+    | "allowance_upper_limit"
+    | "allowance_spouse_amount"
+    | "allowance_child_amount"}`;
+  form: ReturnType<typeof useForm<ClientFormValues>>;
+  step?: string;
+  errorMessage?: string;
+}) {
+  const value = form.watch(name);
+  return (
+    <div className="space-y-1">
+      <Label className="text-xs text-muted-foreground">{label}</Label>
+      <Input
+        type="number"
+        inputMode="numeric"
+        min={0}
+        step={step}
+        value={value === null || value === undefined ? "" : String(value)}
+        onChange={(e) => {
+          const raw = e.target.value;
+          form.setValue(
+            name,
+            raw === "" ? null : Number(raw),
+            { shouldValidate: false },
+          );
+        }}
+      />
+      {errorMessage && <p className="text-xs text-destructive">{errorMessage}</p>}
+    </div>
+  );
+}
+
+const PAYMENT_DATE_PRESETS = [
+  "当月10日",
+  "当月15日",
+  "当月20日",
+  "当月25日",
+  "当月末日",
+  "翌月10日",
+  "翌月15日",
+  "翌月20日",
+  "翌月25日",
+  "翌月末日",
+] as const;
+
+/**
+ * 賃金支払日を Select(プリセット) + その他(自由記述)で入力するフィールド。
+ * 値は string として保存される(schema 変更不要)。
+ */
+function PaymentDateSelect({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const isPreset = (PAYMENT_DATE_PRESETS as readonly string[]).includes(value);
+  const [otherSticky, setOtherSticky] = useState<boolean>(
+    !isPreset && value !== "",
+  );
+  const mode: "preset" | "other" =
+    !isPreset && value !== "" ? "other" : otherSticky ? "other" : "preset";
+  const selectValue =
+    mode === "other" ? "__other__" : isPreset ? value : undefined;
+
+  return (
+    <div className="space-y-2">
+      <Select
+        value={selectValue}
+        onValueChange={(v) => {
+          if (v === "__other__") {
+            setOtherSticky(true);
+            if (isPreset) onChange("");
+          } else {
+            setOtherSticky(false);
+            onChange(v);
+          }
+        }}
+      >
+        <FormControl>
+          <SelectTrigger>
+            <SelectValue placeholder="-- 選択 --" />
+          </SelectTrigger>
+        </FormControl>
+        <SelectContent>
+          {PAYMENT_DATE_PRESETS.map((p) => (
+            <SelectItem key={p} value={p}>
+              {p}
+            </SelectItem>
+          ))}
+          <SelectItem value="__other__">その他(自由記述)</SelectItem>
+        </SelectContent>
+      </Select>
+      {mode === "other" && (
+        <Input
+          placeholder="例: 翌月5日、毎月第4金曜日"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </div>
   );
 }
 
@@ -168,31 +635,52 @@ function MinWageStatus({
   );
 }
 
-export function CustomerForm({ request }: { request: RequestSummary }) {
+type CustomerFormMode = "customer" | "admin-edit";
+
+export function CustomerForm({
+  request,
+  mode = "customer",
+  initialValues = null,
+  onSaved,
+}: {
+  request: RequestSummary;
+  mode?: CustomerFormMode;
+  initialValues?: ClientFormValues | null;
+  onSaved?: () => void;
+}) {
   const router = useRouter();
+  const isAdminEdit = mode === "admin-edit";
   const derived = useMemo(
     () => deriveDefaultsFromTemplate(request.template_name),
     [request.template_name],
   );
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [expandedAllowanceIdx, setExpandedAllowanceIdx] = useState<number>(-1);
+
+  // 既存データ(旧 {name, amount} 形式含む)を新構造に揃えてから defaultValues に渡す
+  const normalizedInitial = useMemo(() => {
+    if (!initialValues) return null;
+    const raw = initialValues as unknown as ClientFormValues & {
+      allowances?: unknown[];
+    };
+    return {
+      ...raw,
+      allowances: Array.isArray(raw.allowances)
+        ? raw.allowances.map(normalizeAllowanceEntry)
+        : [],
+    } as ClientFormValues;
+  }, [initialValues]);
 
   const form = useForm<ClientFormValues>({
     // @hookform/resolvers@5 × zod@4 の型推論差異を回避するためのキャスト。
     // ランタイム動作は問題なく、フィールド名の型安全性は useForm<ClientFormValues> で担保される。
     resolver: zodResolver(clientFormSchema) as unknown as Resolver<ClientFormValues>,
     mode: "onBlur",
-    defaultValues: {
+    defaultValues: normalizedInitial ?? {
       last_name: "",
       first_name: "",
-      last_name_kana: "",
-      first_name_kana: "",
-      birth_date: "",
-      gender: undefined,
-      postal_code: "",
-      address: "",
-      phone: "",
-      email: "",
       employment_type: derived.employment_type,
       has_contract_period: derived.has_contract_period ?? "no",
       contract_start_date: "",
@@ -204,7 +692,6 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
       probation_period: "",
       work_location_initial: "",
       work_location_scope: "",
-      remote_work: undefined,
       job_description_initial: "",
       job_description_scope: "",
       work_time_type: "fixed",
@@ -225,11 +712,11 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
       payment_date: "",
       payment_method: "bank_transfer",
       salary_increase: "",
-      bonus: "",
-      retirement_allowance: "",
+      bonus: "無",
+      retirement_allowance: "無",
       social_insurance: ["rousai"],
-      retirement_clause: "",
-      retirement_age: "",
+      retirement_clause: DEFAULT_RETIREMENT_CLAUSE,
+      retirement_age: DEFAULT_RETIREMENT_AGE,
       remarks: "",
     },
   });
@@ -239,6 +726,8 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
     name: "allowances",
   });
 
+  const lastName = form.watch("last_name");
+  const firstName = form.watch("first_name");
   const employmentType = form.watch("employment_type");
   const hasContractPeriod = form.watch("has_contract_period");
   const renewalLimitExists = form.watch("renewal_limit_exists");
@@ -389,6 +878,28 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
 
   const hasMinWageError = minWageResult?.ok === false;
 
+  // ----------------------------------------------------------------
+  // 週所定労働時間の推定(社会保険加入推奨の注意喚起用・自動選択はしない)
+  //   - 固定時間制 + 曜日指定休日の組み合わせのみ算出可能
+  //   - 週20h以上 → 雇用保険 / 週30h以上 → 健康保険・厚生年金・雇用保険 が推奨。
+  // ----------------------------------------------------------------
+  const weeklyScheduledHours = useMemo(() => {
+    if (workTimeType !== "fixed") return null;
+    const br =
+      typeof breakMinutes === "number"
+        ? breakMinutes
+        : Number(breakMinutes) || null;
+    const net = calcNetWorkMinutes(startTime, endTime, br);
+    if (net === null) return null;
+    const dailyHours = net / 60;
+    const weekdayHolidayCount = holidays?.includes("weekday")
+      ? holidayWeekdays?.length ?? 0
+      : 0;
+    const workingDaysPerWeek = Math.max(7 - weekdayHolidayCount, 0);
+    if (workingDaysPerWeek === 0) return null;
+    return dailyHours * workingDaysPerWeek;
+  }, [workTimeType, startTime, endTime, breakMinutes, holidays, holidayWeekdays]);
+
   // basic_wage の FormMessage と同じ枠でエラー表示させる
   const lastMinWageErrorRef = useRef<boolean>(false);
   useEffect(() => {
@@ -416,13 +927,6 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
   const FIELD_LABELS: Record<string, string> = {
     last_name: "姓",
     first_name: "名",
-    last_name_kana: "姓(フリガナ)",
-    first_name_kana: "名(フリガナ)",
-    birth_date: "生年月日",
-    postal_code: "郵便番号",
-    address: "住所",
-    phone: "電話番号",
-    email: "メールアドレス",
     employment_type: "雇用形態",
     has_contract_period: "契約期間の定め",
     contract_start_date: "契約開始日",
@@ -448,7 +952,37 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
 
   const onSubmit = async (values: ClientFormValues) => {
     setSubmitError(null);
+    setSaveSuccess(false);
     setSubmitting(true);
+
+    if (isAdminEdit) {
+      try {
+        const result = await saveClientInputAction({
+          id: request.id,
+          values,
+        });
+        if (result.ok) {
+          setSaveSuccess(true);
+          onSaved?.();
+          return;
+        }
+        if (result.fieldErrors) {
+          for (const [name, message] of Object.entries(result.fieldErrors)) {
+            form.setError(name as keyof ClientFormValues, {
+              type: "server",
+              message,
+            });
+          }
+        }
+        setSubmitError(result.error);
+      } catch {
+        setSubmitError("保存中にエラーが発生しました。再度お試しください。");
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
     try {
       const res = await fetch("/api/submit", {
         method: "POST",
@@ -501,23 +1035,37 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
     }
   };
 
+  const Wrapper: React.ElementType = isAdminEdit ? "div" : "main";
+
   return (
-    <main className="mx-auto max-w-3xl p-4 md:p-8">
-      {/* 会社情報ヘッダー */}
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle className="text-lg md:text-xl leading-snug">
-            {request.company_name} 様 労働条件通知書 ご入力フォーム
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm text-muted-foreground space-y-1">
-          <div>会社所在地: {request.company_address}</div>
-          <div>代表者: {request.representative_name}</div>
-          <p className="pt-2 text-xs">
-            各セクションをタップで開閉できます。入力内容は事務所で確認のうえ、労働条件通知書として書面化されます。
-          </p>
-        </CardContent>
-      </Card>
+    <Wrapper className={isAdminEdit ? "" : "mx-auto max-w-3xl p-4 md:p-8"}>
+      {/* 会社情報ヘッダー(顧客モードのみ) */}
+      {!isAdminEdit && (
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle className="text-lg md:text-xl leading-snug">
+              {request.company_name} 様 労働条件通知書 ご入力フォーム
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground space-y-1">
+            <div>会社所在地: {request.company_address}</div>
+            <div>代表者: {request.representative_name}</div>
+            <p className="pt-2 text-xs">
+              各セクションをタップで開閉できます。入力内容は事務所で確認のうえ、労働条件通知書として書面化されます。
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* 事務所編集モード: 保存成功バナー */}
+      {isAdminEdit && saveSuccess && (
+        <div
+          role="status"
+          className="mb-4 rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900"
+        >
+          顧客入力を更新しました。
+        </div>
+      )}
 
       {/* 送信API エラーバナー */}
       {submitError && (
@@ -592,6 +1140,35 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
       <Form {...form}>
         <form
           onSubmit={form.handleSubmit(onSubmit, onInvalid)}
+          onKeyDown={(e) => {
+            // Enter での誤送信を防ぎ、次のフォーカス可能要素へ移動する。
+            // textarea 内の改行、IME 変換確定、送信ボタン自体の Enter は
+            // 既定動作を維持する。
+            if (e.key !== "Enter") return;
+            if (e.nativeEvent.isComposing) return;
+            const target = e.target as HTMLElement;
+            const tag = target.tagName;
+            if (tag === "TEXTAREA") return;
+            if (
+              tag === "BUTTON" &&
+              (target as HTMLButtonElement).type === "submit"
+            ) {
+              return;
+            }
+            e.preventDefault();
+            const focusables = Array.from(
+              e.currentTarget.querySelectorAll<HTMLElement>(
+                'input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),button:not([disabled]),[tabindex]:not([tabindex="-1"])',
+              ),
+            ).filter(
+              (el) =>
+                !el.hasAttribute("aria-hidden") && el.offsetParent !== null,
+            );
+            const idx = focusables.indexOf(target);
+            if (idx >= 0 && idx < focusables.length - 1) {
+              focusables[idx + 1].focus();
+            }
+          }}
           className="space-y-4"
           noValidate
         >
@@ -603,7 +1180,7 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
             {/* ========== 1. 労働者基本情報 ========== */}
             <AccordionItem value="sec1">
               <AccordionTrigger className="px-4 text-base">
-                1. 労働者基本情報
+                1. 労働者氏名
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 space-y-4">
                 <div className="grid gap-4 md:grid-cols-2">
@@ -616,7 +1193,11 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                           姓<Req />
                         </FormLabel>
                         <FormControl>
-                          <Input autoComplete="family-name" {...field} />
+                          <Input
+                            autoComplete="family-name"
+                            placeholder="例: 山田"
+                            {...field}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -631,142 +1212,9 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                           名<Req />
                         </FormLabel>
                         <FormControl>
-                          <Input autoComplete="given-name" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <FormField
-                    control={form.control}
-                    name="last_name_kana"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>
-                          姓(フリガナ)<Req />
-                        </FormLabel>
-                        <FormControl>
-                          <Input {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <FormField
-                    control={form.control}
-                    name="first_name_kana"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>
-                          名(フリガナ)<Req />
-                        </FormLabel>
-                        <FormControl>
-                          <Input {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                </div>
-
-                <FormField
-                  control={form.control}
-                  name="birth_date"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>
-                        生年月日(西暦)<Req />
-                      </FormLabel>
-                      <FormControl>
-                        <Input type="date" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <FormField
-                  control={form.control}
-                  name="gender"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>性別</FormLabel>
-                      <FormControl>
-                        <RadioGroup
-                          onValueChange={field.onChange}
-                          value={field.value}
-                          className="flex flex-wrap gap-4 pt-1"
-                        >
-                          <Label className="flex items-center gap-2 font-normal">
-                            <RadioGroupItem value="male" /> 男
-                          </Label>
-                          <Label className="flex items-center gap-2 font-normal">
-                            <RadioGroupItem value="female" /> 女
-                          </Label>
-                          <Label className="flex items-center gap-2 font-normal">
-                            <RadioGroupItem value="no_answer" /> 回答しない
-                          </Label>
-                        </RadioGroup>
-                      </FormControl>
-                      <FormDescription>
-                        社会保険・税務手続きで使用します。
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <FormField
-                  control={form.control}
-                  name="postal_code"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>
-                        郵便番号(ハイフンなし7桁)<Req />
-                      </FormLabel>
-                      <FormControl>
-                        <Input
-                          inputMode="numeric"
-                          autoComplete="postal-code"
-                          placeholder="1000001"
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <FormField
-                  control={form.control}
-                  name="address"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>
-                        住所(都道府県以下)<Req />
-                      </FormLabel>
-                      <FormControl>
-                        <Input autoComplete="street-address" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                <div className="grid gap-4 md:grid-cols-2">
-                  <FormField
-                    control={form.control}
-                    name="phone"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>
-                          電話番号<Req />
-                        </FormLabel>
-                        <FormControl>
                           <Input
-                            inputMode="tel"
-                            autoComplete="tel"
-                            placeholder="09012345678"
+                            autoComplete="given-name"
+                            placeholder="例: 太郎"
                             {...field}
                           />
                         </FormControl>
@@ -774,28 +1222,21 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                       </FormItem>
                     )}
                   />
-                  <FormField
-                    control={form.control}
-                    name="email"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>メールアドレス</FormLabel>
-                        <FormControl>
-                          <Input
-                            type="email"
-                            inputMode="email"
-                            autoComplete="email"
-                            {...field}
-                          />
-                        </FormControl>
-                        <FormDescription>
-                          電子交付をご利用の場合は必須です。
-                        </FormDescription>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
                 </div>
+                {(lastName?.trim() || firstName?.trim()) && (
+                  <div className="rounded-md border bg-muted/40 p-3 text-sm">
+                    <span className="text-xs text-muted-foreground">
+                      通知書の表記プレビュー:
+                    </span>{" "}
+                    <b>
+                      {lastName?.trim() ?? ""}　{firstName?.trim() ?? ""}
+                    </b>
+                    {" 殿"}
+                    <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                      姓と名の区切りが上記のように意図通りか、ご確認ください。
+                    </p>
+                  </div>
+                )}
               </AccordionContent>
             </AccordionItem>
 
@@ -1070,30 +1511,6 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                       <FormDescription>
                         将来的に異動・転勤があり得る範囲をご記入ください。
                       </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="remote_work"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>在宅勤務の有無</FormLabel>
-                      <FormControl>
-                        <RadioGroup
-                          onValueChange={field.onChange}
-                          value={field.value}
-                          className="flex gap-4 pt-1"
-                        >
-                          <Label className="flex items-center gap-2 font-normal">
-                            <RadioGroupItem value="no" /> なし
-                          </Label>
-                          <Label className="flex items-center gap-2 font-normal">
-                            <RadioGroupItem value="yes" /> あり
-                          </Label>
-                        </RadioGroup>
-                      </FormControl>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -1493,7 +1910,7 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>
-                        諸手当の有無<Req />
+                        諸手当の有無(通勤手当等)<Req />
                       </FormLabel>
                       <FormControl>
                         <RadioGroup
@@ -1515,84 +1932,43 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                 />
 
                 {hasAllowances === "yes" && (
-                  <div className="rounded-md border p-3 space-y-3">
-                    <div className="text-sm font-medium">諸手当の内訳</div>
+                  <div className="space-y-3 rounded-md border p-3">
+                    <div className="text-sm font-medium">
+                      手当の内訳(通勤手当もここに含めてください)
+                    </div>
+                    {allowances.fields.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        「手当を追加」ボタンから手当種別を選択してください。
+                      </p>
+                    )}
                     {allowances.fields.map((f, idx) => (
-                      <div
+                      <AllowanceEditorCard
                         key={f.id}
-                        className="grid gap-2 md:grid-cols-[1fr_160px_auto]"
-                      >
-                        <FormField
-                          control={form.control}
-                          name={`allowances.${idx}.name` as const}
-                          render={({ field }) => (
-                            <FormItem>
-                              <FormControl>
-                                <Input
-                                  placeholder="手当名(例:役職手当)"
-                                  {...field}
-                                />
-                              </FormControl>
-                              <FormMessage />
-                            </FormItem>
-                          )}
-                        />
-                        <FormField
-                          control={form.control}
-                          name={`allowances.${idx}.amount` as const}
-                          render={({ field }) => (
-                            <FormItem>
-                              <FormControl>
-                                <Input
-                                  type="number"
-                                  inputMode="numeric"
-                                  placeholder="金額(円)"
-                                  {...field}
-                                />
-                              </FormControl>
-                              <FormMessage />
-                            </FormItem>
-                          )}
-                        />
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => allowances.remove(idx)}
-                        >
-                          削除
-                        </Button>
-                      </div>
+                        idx={idx}
+                        form={form}
+                        isOpen={expandedAllowanceIdx === idx}
+                        onExpand={() => setExpandedAllowanceIdx(idx)}
+                        onCollapse={() => setExpandedAllowanceIdx(-1)}
+                        onRemove={() => {
+                          allowances.remove(idx);
+                          setExpandedAllowanceIdx(-1);
+                        }}
+                      />
                     ))}
                     <Button
                       type="button"
                       variant="secondary"
                       size="sm"
-                      onClick={() => allowances.append({ name: "", amount: 0 })}
+                      onClick={() => {
+                        const newIdx = allowances.fields.length;
+                        allowances.append(emptyAllowanceItem("commute"));
+                        setExpandedAllowanceIdx(newIdx);
+                      }}
                     >
                       手当を追加
                     </Button>
                   </div>
                 )}
-
-                <FormField
-                  control={form.control}
-                  name="commute_allowance"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>通勤手当(円)</FormLabel>
-                      <FormControl>
-                        <Input
-                          type="number"
-                          inputMode="numeric"
-                          placeholder="支給しない場合は空欄"
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
 
                 <div className="grid gap-4 md:grid-cols-2">
                   <FormField
@@ -1614,8 +1990,10 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                           </FormControl>
                           <SelectContent>
                             <SelectItem value="end">月末</SelectItem>
+                            <SelectItem value="10">10日</SelectItem>
                             <SelectItem value="15">15日</SelectItem>
                             <SelectItem value="20">20日</SelectItem>
+                            <SelectItem value="25">25日</SelectItem>
                             <SelectItem value="other">その他</SelectItem>
                           </SelectContent>
                         </Select>
@@ -1648,12 +2026,10 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                         <FormLabel>
                           賃金支払日<Req />
                         </FormLabel>
-                        <FormControl>
-                          <Input
-                            placeholder="例:翌月25日、月末"
-                            {...field}
-                          />
-                        </FormControl>
+                        <PaymentDateSelect
+                          value={field.value ?? ""}
+                          onChange={field.onChange}
+                        />
                         <FormMessage />
                       </FormItem>
                     )}
@@ -1687,19 +2063,18 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                   )}
                 />
 
-                <FormField
+<FormField
                   control={form.control}
                   name="salary_increase"
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>昇給</FormLabel>
-                      <FormControl>
-                        <Textarea
-                          placeholder="例:年1回・人事考課による(就業規則による)"
-                          rows={2}
-                          {...field}
-                        />
-                      </FormControl>
+                      <PresetOrOtherField
+                        value={field.value ?? ""}
+                        onChange={field.onChange}
+                        presets={SALARY_INCREASE_PRESETS}
+                        otherPlaceholder="昇給についての自由記述"
+                      />
                       <FormMessage />
                     </FormItem>
                   )}
@@ -1710,13 +2085,12 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>賞与</FormLabel>
-                      <FormControl>
-                        <Textarea
-                          placeholder="例:年2回(7月・12月)、業績による"
-                          rows={2}
-                          {...field}
-                        />
-                      </FormControl>
+                      <PresetOrOtherField
+                        value={field.value ?? ""}
+                        onChange={field.onChange}
+                        presets={BONUS_PRESETS}
+                        otherPlaceholder="賞与についての自由記述"
+                      />
                       <FormMessage />
                     </FormItem>
                   )}
@@ -1727,13 +2101,13 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>退職金</FormLabel>
-                      <FormControl>
-                        <Textarea
-                          placeholder="例:就業規則による / 制度なし"
-                          rows={2}
-                          {...field}
-                        />
-                      </FormControl>
+                      <PresetOrOtherField
+                        value={field.value ?? ""}
+                        onChange={field.onChange}
+                        presets={RETIREMENT_ALLOWANCE_PRESETS}
+                        otherLabel="有(自由記述)"
+                        otherPlaceholder="退職金制度の内容を自由記述"
+                      />
                       <FormMessage />
                     </FormItem>
                   )}
@@ -1741,10 +2115,10 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
               </AccordionContent>
             </AccordionItem>
 
-            {/* ========== 7. その他 ========== */}
+            {/* ========== 7. 社会保険・退職・定年等 ========== */}
             <AccordionItem value="sec7">
               <AccordionTrigger className="px-4 text-base">
-                7. その他
+                7. 社会保険・退職・定年等
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 space-y-4">
                 <FormField
@@ -1790,6 +2164,19 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                           />
                         ))}
                       </div>
+                      {weeklyScheduledHours !== null &&
+                        weeklyScheduledHours >= 20 && (
+                          <div
+                            role="status"
+                            className="mt-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900"
+                          >
+                            現在の週所定労働時間は約{" "}
+                            <b>{weeklyScheduledHours.toFixed(1)}</b> 時間です。
+                            {weeklyScheduledHours >= 30
+                              ? "週30時間以上のため、健康保険・厚生年金・雇用保険の加入が推奨されます。"
+                              : "週20時間以上のため、雇用保険の加入が推奨されます。"}
+                          </div>
+                        )}
                       <FormMessage />
                     </FormItem>
                   )}
@@ -1801,13 +2188,19 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>退職に関する事項</FormLabel>
-                      <FormControl>
-                        <Textarea
-                          placeholder="例:自己都合退職は30日前までに届け出(就業規則による)"
-                          rows={2}
-                          {...field}
-                        />
-                      </FormControl>
+                      <FormDescription>
+                        就業規則に記載されている内容を参照する形式が一般的です。特別な定めがある場合のみ「その他」から自由記述してください。
+                      </FormDescription>
+                      <PresetOrOtherField
+                        value={field.value ?? ""}
+                        onChange={field.onChange}
+                        presets={RETIREMENT_CLAUSE_PRESETS}
+                        otherLabel="その他(自由記述)"
+                        otherPlaceholder="退職に関する事項を自由記述"
+                      />
+                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                        労基法15条・施行規則5条で明示必須の事項です。就業規則を参照する形式でも適法とされています(厚生労働省モデル労働条件通知書準拠)。
+                      </p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -1818,12 +2211,19 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>定年</FormLabel>
-                      <FormControl>
-                        <Input
-                          placeholder="例:満60歳に達した月の末日"
-                          {...field}
-                        />
-                      </FormControl>
+                      <FormDescription>
+                        一般的な定めは「60歳定年(65歳まで再雇用)」です。御社の就業規則に合わせて選択してください。
+                      </FormDescription>
+                      <PresetOrOtherField
+                        value={field.value ?? ""}
+                        onChange={field.onChange}
+                        presets={RETIREMENT_AGE_PRESETS}
+                        otherLabel="その他(自由記述)"
+                        otherPlaceholder="定年の定めを自由記述"
+                      />
+                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                        高年齢者雇用安定法8条により、定年を定める場合は60歳以上とする必要があります。また同法9条により65歳までの雇用確保措置(定年の引上げ・継続雇用制度・定年廃止のいずれか)が義務付けられています。
+                      </p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -1857,15 +2257,21 @@ export function CustomerForm({ request }: { request: RequestSummary }) {
               disabled={
                 submitting ||
                 form.formState.isSubmitting ||
-                hasMinWageError ||
+                (!isAdminEdit && hasMinWageError) ||
                 Object.keys(form.formState.errors).length > 0
               }
             >
-              {submitting ? "送信中..." : "送信"}
+              {isAdminEdit
+                ? submitting
+                  ? "保存中..."
+                  : "保存"
+                : submitting
+                  ? "送信中..."
+                  : "送信"}
             </Button>
           </div>
         </form>
       </Form>
-    </main>
+    </Wrapper>
   );
 }
