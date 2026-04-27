@@ -1,8 +1,20 @@
 "use client";
 
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import type { ContractRequestStatus } from "@/lib/supabase/types";
 
 import { deleteRequestAction } from "./actions";
@@ -21,34 +33,70 @@ export function DeleteButton({
   companyName: string;
   status: ContractRequestStatus;
 }) {
+  const [open, setOpen] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  function handleClick() {
-    const message =
-      status === "pending"
-        ? `「${companyName}」の依頼を削除します。\nURLは無効化され、元に戻せません。よろしいですか?`
-        : `「${companyName}」の依頼を削除します。\n顧客が入力した内容・事務所側の追記がすべて失われ、元に戻せません。\n本当に削除しますか?`;
-    const ok = window.confirm(message);
-    if (!ok) return;
+  const description =
+    status === "pending"
+      ? `「${companyName}」の依頼を削除します。URLは無効化され、元に戻せません。`
+      : `「${companyName}」の依頼を削除します。顧客が入力した内容・事務所側の追記がすべて失われ、元に戻せません。`;
 
+  function handleConfirm(e: React.MouseEvent) {
+    // Radix のデフォルトはアクション後に閉じるが、エラー時はダイアログを残したいので
+    // 自前で制御する。
+    e.preventDefault();
+    setErrorMessage(null);
     startTransition(async () => {
       const r = await deleteRequestAction({ id });
       if (!r.ok) {
-        window.alert(r.error);
+        setErrorMessage(r.error);
+        return;
       }
+      setOpen(false);
     });
   }
 
   return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      className="h-7 px-3 text-destructive hover:bg-destructive/10 hover:text-destructive"
-      onClick={handleClick}
-      disabled={isPending}
+    <AlertDialog
+      open={open}
+      onOpenChange={(next) => {
+        if (isPending) return; // 処理中は閉じさせない
+        setOpen(next);
+        if (!next) setErrorMessage(null);
+      }}
     >
-      {isPending ? "削除中" : "削除"}
-    </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="h-7 px-3 text-destructive hover:bg-destructive/10 hover:text-destructive"
+        onClick={() => setOpen(true)}
+        disabled={isPending}
+      >
+        {isPending ? "削除中" : "削除"}
+      </Button>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>依頼を削除しますか?</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        {errorMessage ? (
+          <p className="text-sm text-destructive">{errorMessage}</p>
+        ) : null}
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isPending}>キャンセル</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={handleConfirm}
+            disabled={isPending}
+            className={cn(
+              buttonVariants({ variant: "destructive" }),
+            )}
+          >
+            {isPending ? "削除中..." : "削除する"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

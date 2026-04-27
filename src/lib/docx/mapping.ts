@@ -328,7 +328,12 @@ export function buildDocxContext(input: DocxContextInput): DocxContext {
     allowances: buildAllowances(client),
 
     // --- 固定残業代(単位なし・カンマ区切り) ---
-    has_fixed_overtime: office.fixed_overtime === "present",
+    // 顧客側で has_fixed_overtime が選択されていればそれを優先。
+    // 進行中(レガシー)レコードは事務所側 office.fixed_overtime にフォールバック。
+    has_fixed_overtime:
+      client.has_fixed_overtime !== undefined
+        ? client.has_fixed_overtime === "yes"
+        : office.fixed_overtime === "present",
     fixed_overtime_name: office.fixed_overtime_name ?? "",
     fixed_overtime_amount: money(
       typeof office.fixed_overtime_amount === "number"

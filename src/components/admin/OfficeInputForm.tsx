@@ -13,6 +13,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { BusyOverlay } from "@/components/ui/busy-overlay";
+import { TemplateMissingAlert } from "@/components/admin/template-missing-alert";
 
 import type { ClientFormValues } from "@/lib/validations/client-form";
 import {
@@ -73,13 +85,20 @@ export function OfficeInputForm({
 }: Props) {
   // 既存の office_input に値が無い場合のみ、会社代表者名を相談窓口のデフォルトとして充填。
   // saved にも同じ値を入れて、ロード直後は dirty=false として扱う(未編集なら保存不要)。
+  // また、顧客側で has_fixed_overtime が確定している場合は office.fixed_overtime も
+  // それに合わせて同期する(検証/マッピングと整合させる)。
   const merged = useMemo<OfficeInputValues>(() => {
     const base = { ...emptyOfficeInput(), ...initialValues };
     if (!base.consultation_contact && defaultConsultationContact) {
       base.consultation_contact = defaultConsultationContact;
     }
+    if (client?.has_fixed_overtime === "yes") {
+      base.fixed_overtime = "present";
+    } else if (client?.has_fixed_overtime === "no") {
+      base.fixed_overtime = "none";
+    }
     return base;
-  }, [initialValues, defaultConsultationContact]);
+  }, [initialValues, defaultConsultationContact, client?.has_fixed_overtime]);
 
   const [values, setValues] = useState<OfficeInputValues>(() => merged);
   const [saved, setSaved] = useState<OfficeInputValues>(() => merged);
@@ -88,6 +107,14 @@ export function OfficeInputForm({
   const [statusPending, startStatusChange] = useTransition();
   const [docxPending, startDocx] = useTransition();
   const [docxMessage, setDocxMessage] = useState<string | null>(null);
+  const [docxTemplateMissing, setDocxTemplateMissing] = useState<
+    string | null
+  >(null);
+  const [pendingDirtyAction, setPendingDirtyAction] = useState<
+    | { kind: "status"; status: "reviewed" | "delivered" }
+    | { kind: "docx" }
+    | null
+  >(null);
 
   const dirty = !isDeepEqual(values, saved);
 
@@ -126,13 +153,7 @@ export function OfficeInputForm({
     });
   }
 
-  function handleStatusChange(next: "reviewed" | "delivered") {
-    if (dirty) {
-      const ok = window.confirm(
-        "未保存の入力があります。先に保存してからステータスを変更してください。\nそのまま続ける場合は OK を押してください(変更は破棄されます)。",
-      );
-      if (!ok) return;
-    }
+  function executeStatusChange(next: "reviewed" | "delivered") {
     setSubmitError(null);
     startStatusChange(async () => {
       const r = await changeStatusAction({ id: requestId, status: next });
@@ -142,15 +163,26 @@ export function OfficeInputForm({
     });
   }
 
-  async function handleGenerateDocx() {
+  function handleStatusChange(next: "reviewed" | "delivered") {
+    if (dirty) {
+      setPendingDirtyAction({ kind: "status", status: next });
+      return;
+    }
+    executeStatusChange(next);
+  }
+
+  function handleGenerateDocx() {
     setDocxMessage(null);
     if (!validation.canGenerate) return;
     if (dirty) {
-      const ok = window.confirm(
-        "未保存の入力があります。先に保存してから docx を生成してください。\n続行しますか?",
-      );
-      if (!ok) return;
+      setPendingDirtyAction({ kind: "docx" });
+      return;
     }
+    executeDocxGeneration();
+  }
+
+  function executeDocxGeneration() {
+    setDocxTemplateMissing(null);
     startDocx(async () => {
       try {
         const res = await fetch("/api/generate-docx", {
@@ -160,6 +192,14 @@ export function OfficeInputForm({
         });
         const data = await res.json().catch(() => null);
         if (!res.ok) {
+          if (data?.code === "template_missing") {
+            // ファイル名はメッセージ中の '<name>' を抽出して渡す。
+            // generator.ts は `ひな形ファイル '労働条件通知書_ひな形_xx.docx' を …` 形式で返す。
+            const m = /'([^']+)'/.exec(data.message ?? "");
+            setDocxTemplateMissing(m?.[1] ?? "(ファイル名不明)");
+            setDocxMessage(null);
+            return;
+          }
           setDocxMessage(
             data?.message ?? `docx 生成に失敗しました(${res.status})`,
           );
@@ -200,13 +240,30 @@ export function OfficeInputForm({
     });
   }
 
-  const showProbationSection = client?.has_probation === "yes";
-  const isFixedOvertime = values.fixed_overtime === "present";
+  // 顧客側で「あり/なし」が選択されているか(レガシーデータでは undefined)。
+  // 事務所側 UI と office.fixed_overtime / 検証ロジックは下記の優先順で動く:
+  //   1. 顧客が yes/no を選んでいる → その通りに固定(事務所側 Select は隠す)
+  //   2. 顧客側に値がない(レガシー) → 従来の事務所側 Select で選択
+  const clientHasProbation = client?.has_probation; // "yes" | "no" | undefined
+  const clientHasFixedOvertime = client?.has_fixed_overtime; // 同上
+  const showProbationSection = clientHasProbation !== "no"; // "yes" or undefined → 表示
+  const showFixedOvertimeDetails =
+    clientHasFixedOvertime === "yes" ||
+    (clientHasFixedOvertime === undefined && values.fixed_overtime === "present");
   const isYearlyVariable = values.worktime_type === "yearly_variable";
   const isFlextime = values.worktime_type === "flextime";
 
+  const busy = savePending || statusPending || docxPending;
+  const busyLabel = docxPending
+    ? "docx を生成しています..."
+    : savePending
+      ? "保存中..."
+      : statusPending
+        ? "ステータスを変更しています..."
+        : "";
+
   return (
-    <div className="space-y-6">
+    <div className="relative space-y-6" aria-busy={busy}>
       {/* Section 2. 労働時間制の専門判断 */}
       <FormSection title="2. 労働時間制の専門判断">
         <Field label="労働時間制区分">
@@ -358,27 +415,41 @@ export function OfficeInputForm({
 
       {/* Section 4. 固定残業代 */}
       <FormSection title="4. 固定残業代の設計">
-        <Field label="固定残業代の設定">
-          <Select
-            value={values.fixed_overtime ?? ""}
-            onValueChange={(v) =>
-              update(
-                "fixed_overtime",
-                (v || undefined) as OfficeInputValues["fixed_overtime"],
-              )
-            }
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="選択してください" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="none">なし</SelectItem>
-              <SelectItem value="present">あり</SelectItem>
-            </SelectContent>
-          </Select>
-        </Field>
+        {clientHasFixedOvertime === "no" ? (
+          <p className="rounded-md border border-muted bg-muted/40 p-3 text-sm text-muted-foreground">
+            顧客側で「固定残業代なし」が選択されています。詳細入力は不要です。
+          </p>
+        ) : null}
 
-        {isFixedOvertime && (
+        {clientHasFixedOvertime === "yes" ? (
+          <p className="rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900">
+            顧客側で「固定残業代あり」が選択されています。下記の詳細を入力してください。
+          </p>
+        ) : null}
+
+        {clientHasFixedOvertime === undefined && (
+          <Field label="固定残業代の設定">
+            <Select
+              value={values.fixed_overtime ?? ""}
+              onValueChange={(v) =>
+                update(
+                  "fixed_overtime",
+                  (v || undefined) as OfficeInputValues["fixed_overtime"],
+                )
+              }
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="選択してください" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">なし</SelectItem>
+                <SelectItem value="present">あり</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
+
+        {showFixedOvertimeDetails && (
           <>
             <Field label="固定残業代の名称">
               <Input
@@ -440,9 +511,22 @@ export function OfficeInputForm({
         )}
       </FormSection>
 
-      {/* Section 5. 試用期間(顧客側で "あり" のときのみ) */}
-      {showProbationSection && (
-        <FormSection title="5. 試用期間の詳細">
+      {/* Section 5. 試用期間(顧客側で "あり" のときのみ詳細表示) */}
+      <FormSection title="5. 試用期間の詳細">
+        {clientHasProbation === "no" ? (
+          <p className="rounded-md border border-muted bg-muted/40 p-3 text-sm text-muted-foreground">
+            顧客側で「試用期間なし」が選択されています。詳細入力は不要です。
+          </p>
+        ) : null}
+
+        {clientHasProbation === "yes" ? (
+          <p className="rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900">
+            顧客側で「試用期間あり({client?.probation_period ?? "期間未入力"})」が選択されています。下記の詳細を入力してください。
+          </p>
+        ) : null}
+
+        {showProbationSection && (
+          <>
           <Field label="試用期間中の労働条件差異">
             <Select
               value={values.probation_difference ?? ""}
@@ -511,8 +595,9 @@ export function OfficeInputForm({
               </Field>
             </>
           )}
-        </FormSection>
-      )}
+          </>
+        )}
+      </FormSection>
 
       {/* Section 7. 契約書記載の補助情報(docx 生成用) */}
       <FormSection title="7. 契約書記載の補助情報(docx生成用)">
@@ -649,6 +734,14 @@ export function OfficeInputForm({
             {submitError}
           </p>
         )}
+        {docxTemplateMissing && (
+          <div className="mt-3">
+            <TemplateMissingAlert
+              title="docx を生成できません"
+              fileName={docxTemplateMissing}
+            />
+          </div>
+        )}
         {docxMessage && (
           <p className="mt-2 text-sm text-muted-foreground">{docxMessage}</p>
         )}
@@ -657,6 +750,43 @@ export function OfficeInputForm({
           {dirty && <span className="ml-2 text-amber-700">(未保存)</span>}
         </p>
       </div>
+
+      <AlertDialog
+        open={pendingDirtyAction !== null}
+        onOpenChange={(next) => {
+          if (!next) setPendingDirtyAction(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>未保存の変更があります</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDirtyAction?.kind === "status"
+                ? "未保存の入力を破棄してステータスを変更しますか?変更内容は失われます。"
+                : "未保存の入力を破棄して docx を生成しますか?保存していない内容は反映されません。"}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>キャンセル</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const action = pendingDirtyAction;
+                setPendingDirtyAction(null);
+                if (!action) return;
+                if (action.kind === "status") {
+                  executeStatusChange(action.status);
+                } else {
+                  executeDocxGeneration();
+                }
+              }}
+            >
+              破棄して続行
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <BusyOverlay show={busy} label={busyLabel} />
     </div>
   );
 }

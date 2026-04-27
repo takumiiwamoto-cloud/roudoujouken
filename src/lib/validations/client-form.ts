@@ -48,6 +48,7 @@ export const paymentCutoffValues = [
   "other",
 ] as const;
 export const hasAllowancesValues = ["yes", "no"] as const;
+export const hasFixedOvertimeValues = ["yes", "no"] as const;
 export const holidayTypeValues = ["weekday", "shift", "other"] as const;
 export const socialInsuranceValues = [
   "health",
@@ -122,6 +123,7 @@ const baseClientFormSchema = z.object({
   basic_wage: z.coerce
     .number({ message: "数値で入力してください" })
     .positive("0より大きい金額を入力してください"),
+  has_fixed_overtime: z.enum(hasFixedOvertimeValues),
   has_allowances: z.enum(hasAllowancesValues),
   allowances: z
     .array(

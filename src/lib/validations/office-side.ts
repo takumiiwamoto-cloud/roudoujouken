@@ -252,7 +252,12 @@ export function validateOfficeInput(
   }
 
   // --- No.12 固定残業代適法性 + No.13 36協定整合性 ---
-  if (office.fixed_overtime === "present") {
+  // 顧客側 has_fixed_overtime が選択されていれば優先。レガシーは office.fixed_overtime。
+  const effectiveHasFixedOvertime =
+    client?.has_fixed_overtime !== undefined
+      ? client.has_fixed_overtime === "yes"
+      : office.fixed_overtime === "present";
+  if (effectiveHasFixedOvertime) {
     const hours =
       typeof office.fixed_overtime_hours === "number"
         ? office.fixed_overtime_hours
@@ -327,7 +332,7 @@ export function validateOfficeInput(
   // --- No.14 管理監督者×残業代矛盾 ---
   if (
     office.manager_supervisor === "yes" &&
-    office.fixed_overtime === "present"
+    effectiveHasFixedOvertime
   ) {
     issues.push({
       code: "14",

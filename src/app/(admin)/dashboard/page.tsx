@@ -137,8 +137,8 @@ export default async function AdminDashboardPage({
                   className={[
                     "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
                     active
-                      ? "bg-background text-foreground shadow"
-                      : "text-muted-foreground hover:text-foreground",
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
                   ].join(" ")}
                   aria-current={active ? "page" : undefined}
                 >
@@ -150,8 +150,9 @@ export default async function AdminDashboardPage({
           <DashboardSearch initialQ={q} />
         </div>
 
-        <div className="mt-4 overflow-x-auto rounded-lg border bg-card">
-          <table className="w-full min-w-[760px] border-collapse text-sm">
+        {/* デスクトップ: テーブル表示 (md 以上) */}
+        <div className="mt-4 hidden overflow-x-auto rounded-lg border bg-card md:block">
+          <table className="w-full border-collapse text-sm">
             <thead>
               <tr className="border-b bg-muted/40 text-left text-xs text-muted-foreground">
                 <th className="px-3 py-2 font-medium">会社名</th>
@@ -219,6 +220,58 @@ export default async function AdminDashboardPage({
               ))}
             </tbody>
           </table>
+        </div>
+
+        {/* モバイル: カード表示 (md 未満) */}
+        <div className="mt-4 space-y-2 md:hidden">
+          {rows.length === 0 && (
+            <div className="rounded-lg border bg-card p-6 text-center text-sm text-muted-foreground">
+              該当する依頼はありません。
+            </div>
+          )}
+          {rows.map((row) => (
+            <div
+              key={row.id}
+              className="rounded-lg border bg-card p-3 shadow-sm"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="break-words font-medium leading-snug">
+                    {row.company_name}
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {extractEmployeeName(row)}
+                  </p>
+                </div>
+                <span
+                  className={[
+                    "inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+                    STATUS_BADGE_CLASS[row.status],
+                  ].join(" ")}
+                >
+                  {STATUS_LABELS[row.status]}
+                </span>
+              </div>
+              <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                <dt>作成日</dt>
+                <dd>{formatDateTime(row.created_at)}</dd>
+                <dt>更新日</dt>
+                <dd>{formatDateTime(row.updated_at)}</dd>
+              </dl>
+              <div className="mt-3 flex justify-end gap-2">
+                <Button asChild variant="outline" size="sm" className="h-8">
+                  <Link href={`/detail/${row.id}`}>詳細</Link>
+                </Button>
+                {row.status !== "delivered" && (
+                  <DeleteButton
+                    id={row.id}
+                    companyName={row.company_name}
+                    status={row.status}
+                  />
+                )}
+              </div>
+            </div>
+          ))}
         </div>
 
         {rows.length === 200 && (

@@ -14,6 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { TemplateMissingAlert } from "@/components/admin/template-missing-alert";
 
 import { createRequestAction, type CreateRequestResult } from "./actions";
 
@@ -148,6 +149,10 @@ export function NewRequestForm({ templates, defaultExpiresOn }: Props) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
+      {templates.length === 0 && (
+        <TemplateMissingAlert title="URLを発行できません" />
+      )}
+
       <div className="space-y-1.5">
         <Label htmlFor="company_name">
           会社名 <span className="text-destructive">*</span>
@@ -230,11 +235,6 @@ export function NewRequestForm({ templates, defaultExpiresOn }: Props) {
         </Select>
         {errors.template_name && (
           <p className="text-xs text-destructive">{errors.template_name}</p>
-        )}
-        {templates.length === 0 && (
-          <p className="text-xs text-destructive">
-            templates/ フォルダに docx ファイルが見つかりません。
-          </p>
         )}
       </div>
 

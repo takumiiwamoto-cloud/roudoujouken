@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { requireUser } from "@/lib/supabase/auth";
 import { LogoutButton } from "@/components/admin/logout-button";
+import { AdminMobileNav } from "@/components/admin/admin-mobile-nav";
 
 /**
  * 事務所側画面のレイアウトシェル(サイドバー + メイン領域)。
@@ -9,6 +10,7 @@ import { LogoutButton } from "@/components/admin/logout-button";
  * - サーバーコンポーネント。先頭で requireUser を呼ぶことで多層防御とする
  *   (middleware でも未ログインは弾いているが、万一を考慮)
  * - サイドバー: 依頼一覧 / 新規作成 / (下部)ログインユーザー + ログアウト
+ * - md 未満ではサイドバー非表示、ハンバーガー → ドロワー(AdminMobileNav)
  */
 
 const NAV_ITEMS = [
@@ -18,10 +20,13 @@ const NAV_ITEMS = [
 
 export async function AdminShell({ children }: { children: React.ReactNode }) {
   const user = await requireUser();
+  const userEmail = user.email ?? "";
 
   return (
-    <div className="flex min-h-screen bg-muted/30">
-      <aside className="flex w-60 shrink-0 flex-col border-r bg-card">
+    <div className="flex min-h-screen flex-col bg-muted/30 md:flex-row">
+      <AdminMobileNav navItems={NAV_ITEMS} userEmail={userEmail} />
+
+      <aside className="hidden w-60 shrink-0 flex-col border-r bg-card md:flex">
         <div className="border-b p-4">
           <p className="text-xs text-muted-foreground">雇用契約書自動作成ツール</p>
           <p className="mt-1 text-sm font-semibold">事務所管理画面</p>
@@ -44,16 +49,16 @@ export async function AdminShell({ children }: { children: React.ReactNode }) {
             <p className="text-[11px] text-muted-foreground">ログイン中</p>
             <p
               className="truncate text-xs font-medium"
-              title={user.email ?? ""}
+              title={userEmail}
             >
-              {user.email ?? "(メール未設定)"}
+              {userEmail || "(メール未設定)"}
             </p>
           </div>
           <LogoutButton />
         </div>
       </aside>
 
-      <main className="flex-1 overflow-x-auto">{children}</main>
+      <main className="min-w-0 flex-1 overflow-x-auto">{children}</main>
     </div>
   );
 }

@@ -71,6 +71,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Label } from "@/components/ui/label";
+import { BusyOverlay } from "@/components/ui/busy-overlay";
 
 type RequestSummary = {
   id: string;
@@ -656,6 +657,7 @@ export function CustomerForm({
   );
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitErrorRetryable, setSubmitErrorRetryable] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [expandedAllowanceIdx, setExpandedAllowanceIdx] = useState<number>(-1);
 
@@ -664,12 +666,19 @@ export function CustomerForm({
     if (!initialValues) return null;
     const raw = initialValues as unknown as ClientFormValues & {
       allowances?: unknown[];
+      has_fixed_overtime?: string;
     };
     return {
       ...raw,
       allowances: Array.isArray(raw.allowances)
         ? raw.allowances.map(normalizeAllowanceEntry)
         : [],
+      // レガシーデータ(has_fixed_overtime 未保存)は admin-edit で再保存できるよう "no" を初期値に。
+      // 顧客が実際は「あり」だった場合は事務所が確認のうえ "yes" に切り替える運用。
+      has_fixed_overtime:
+        raw.has_fixed_overtime === "yes" || raw.has_fixed_overtime === "no"
+          ? raw.has_fixed_overtime
+          : "no",
     } as ClientFormValues;
   }, [initialValues]);
 
@@ -704,6 +713,7 @@ export function CustomerForm({
       annual_leave: "",
       wage_type: "monthly",
       basic_wage: 0,
+      has_fixed_overtime: "no",
       has_allowances: "no",
       allowances: [],
       commute_allowance: "",
@@ -732,6 +742,7 @@ export function CustomerForm({
   const hasContractPeriod = form.watch("has_contract_period");
   const renewalLimitExists = form.watch("renewal_limit_exists");
   const hasProbation = form.watch("has_probation");
+  const hasFixedOvertime = form.watch("has_fixed_overtime");
   const workTimeType = form.watch("work_time_type");
   const hasAllowances = form.watch("has_allowances");
   const paymentCutoff = form.watch("payment_cutoff_day");
@@ -944,6 +955,7 @@ export function CustomerForm({
     holidays: "休日",
     holiday_weekdays: "休日指定曜日",
     basic_wage: "基本給",
+    has_fixed_overtime: "固定残業代の有無",
     payment_cutoff_day: "賃金締切日",
     payment_cutoff_other: "賃金締切日(その他)",
     payment_date: "賃金支払日",
@@ -952,6 +964,7 @@ export function CustomerForm({
 
   const onSubmit = async (values: ClientFormValues) => {
     setSubmitError(null);
+    setSubmitErrorRetryable(false);
     setSaveSuccess(false);
     setSubmitting(true);
 
@@ -973,10 +986,15 @@ export function CustomerForm({
               message,
             });
           }
+          setSubmitError(result.error);
+          setSubmitErrorRetryable(false);
+        } else {
+          setSubmitError(result.error);
+          setSubmitErrorRetryable(true);
         }
-        setSubmitError(result.error);
       } catch {
         setSubmitError("保存中にエラーが発生しました。再度お試しください。");
+        setSubmitErrorRetryable(true);
       } finally {
         setSubmitting(false);
       }
@@ -1012,16 +1030,93 @@ export function CustomerForm({
         internal_error:
           "サーバーでエラーが発生しました。時間をおいて再度お試しください。",
       };
+      const retryableCodes = new Set(["internal_error"]);
       setSubmitError(
         messages[body.error ?? ""] ??
           "送信に失敗しました。時間をおいて再度お試しください。",
+      );
+      setSubmitErrorRetryable(
+        !body.error || retryableCodes.has(body.error),
       );
     } catch {
       setSubmitError(
         "通信エラーが発生しました。ネットワーク接続をご確認のうえ再度お試しください。",
       );
+      setSubmitErrorRetryable(true);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // フィールド名 → アコーディオン section ID の対応表。
+  // エラーサマリのジャンプ機能と最低賃金バナーの「基本給を確認」ボタンで使う。
+  const FIELD_SECTION: Record<string, string> = {
+    last_name: "sec1",
+    first_name: "sec1",
+    employment_type: "sec2",
+    has_contract_period: "sec2",
+    contract_start_date: "sec2",
+    contract_end_date: "sec2",
+    renewal_type: "sec2",
+    renewal_limit_exists: "sec2",
+    renewal_limit_content: "sec2",
+    has_probation: "sec2",
+    probation_period: "sec2",
+    work_location_initial: "sec3",
+    work_location_scope: "sec3",
+    job_description_initial: "sec4",
+    job_description_scope: "sec4",
+    work_time_type: "sec5",
+    start_time: "sec5",
+    end_time: "sec5",
+    break_minutes: "sec5",
+    shift_note: "sec5",
+    holidays: "sec5",
+    holiday_weekdays: "sec5",
+    annual_leave: "sec5",
+    wage_type: "sec6",
+    basic_wage: "sec6",
+    has_fixed_overtime: "sec6",
+    has_allowances: "sec6",
+    allowances: "sec6",
+    commute_allowance: "sec6",
+    payment_cutoff_day: "sec6",
+    payment_cutoff_other: "sec6",
+    payment_date: "sec6",
+    payment_method: "sec6",
+    salary_increase: "sec6",
+    bonus: "sec6",
+    retirement_allowance: "sec6",
+    social_insurance: "sec7",
+    retirement_clause: "sec7",
+    retirement_age: "sec7",
+    remarks: "sec7",
+  };
+
+  // 指定フィールドに移動する。アコーディオンが閉じていれば開いてから
+  // スクロール+フォーカス。配列フィールド(allowances 等)は input が
+  // 個別 name で管理されるためフォールバックとして section 先頭にスクロール。
+  const jumpToField = (fieldName: string) => {
+    const sectionId = FIELD_SECTION[fieldName.split(".")[0] ?? fieldName];
+    if (sectionId) {
+      const sec = document.getElementById(sectionId);
+      const trigger = sec?.querySelector<HTMLButtonElement>(
+        "button[aria-expanded]",
+      );
+      if (trigger && trigger.getAttribute("aria-expanded") !== "true") {
+        trigger.click();
+      }
+      setTimeout(() => {
+        const el = document.querySelector<HTMLElement>(
+          `[name="${fieldName}"]`,
+        );
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          el.focus();
+        } else {
+          sec?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 200);
     }
   };
 
@@ -1029,16 +1124,64 @@ export function CustomerForm({
     // eslint-disable-next-line no-console
     console.warn("[C-01 バリデーションエラー]", errors);
     const firstKey = Object.keys(errors)[0];
-    if (firstKey) {
-      const el = document.querySelector<HTMLElement>(`[name="${firstKey}"]`);
-      el?.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
+    if (firstKey) jumpToField(firstKey);
   };
 
   const Wrapper: React.ElementType = isAdminEdit ? "div" : "main";
 
+  // 最低賃金 NG 時の常時表示用テキスト(スクロール追従バナーで使う)。
+  const minWageNgInfo =
+    hasMinWageError && minWageResult && "hourlyEquiv" in minWageResult
+      ? {
+          hourly: Math.floor(minWageResult.hourlyEquiv),
+          threshold: minWageResult.threshold,
+          prefecture: minWageResult.prefecture,
+        }
+      : null;
+
   return (
     <Wrapper className={isAdminEdit ? "" : "mx-auto max-w-3xl p-4 md:p-8"}>
+      {/* 最低賃金違反の sticky バナー(顧客モードのみ・NG 時のみ表示) */}
+      {!isAdminEdit && minWageNgInfo && (
+        <div
+          role="alert"
+          className="sticky top-0 z-20 -mx-4 mb-4 border-b-2 border-destructive bg-destructive/15 px-4 py-2 backdrop-blur md:-mx-8 md:px-8"
+        >
+          <div className="flex items-start gap-2">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
+              aria-hidden="true"
+            >
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            <div className="min-w-0 flex-1 text-xs leading-relaxed text-destructive">
+              <p className="font-semibold">
+                最低賃金違反: 時給換算 {minWageNgInfo.hourly}円 が{minWageNgInfo.prefecture}の最低賃金 {minWageNgInfo.threshold}円 を下回ります
+              </p>
+              <p className="mt-0.5">
+                基本給を再確認してください。このままでは送信できません。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => jumpToField("basic_wage")}
+              className="shrink-0 rounded-md border border-destructive/40 bg-background px-2 py-1 text-xs font-medium text-destructive hover:bg-destructive/10"
+            >
+              基本給を確認
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 会社情報ヘッダー(顧客モードのみ) */}
       {!isAdminEdit && (
         <Card className="mb-6">
@@ -1067,13 +1210,61 @@ export function CustomerForm({
         </div>
       )}
 
+      {/* バリデーションエラーサマリ(エラーがある間は常時表示) */}
+      {Object.keys(form.formState.errors).length > 0 && (
+          <div
+            role="alert"
+            className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+          >
+            <p className="font-semibold">
+              入力内容に不備があります。下記をご確認ください。
+            </p>
+            <ul className="mt-2 space-y-1 pl-1">
+              {Object.entries(form.formState.errors).map(([key, err]) => {
+                const label = FIELD_LABELS[key] ?? key;
+                const message =
+                  err && typeof err === "object" && "message" in err
+                    ? String((err as { message?: unknown }).message ?? "")
+                    : "";
+                return (
+                  <li key={key}>
+                    <button
+                      type="button"
+                      onClick={() => jumpToField(key)}
+                      className="text-left text-destructive underline-offset-2 hover:underline"
+                    >
+                      ・{label}
+                      {message ? `: ${message}` : ""}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
       {/* 送信API エラーバナー */}
       {submitError && (
         <div
           role="alert"
           className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
         >
-          {submitError}
+          <p>{submitError}</p>
+          {submitErrorRetryable && (
+            <div className="mt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={submitting}
+                onClick={() =>
+                  form.handleSubmit(onSubmit, onInvalid)()
+                }
+              >
+                {submitting ? "送信中..." : "もう一度送信する"}
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
@@ -1097,49 +1288,11 @@ export function CustomerForm({
         </div>
       )}
 
-      {/* エラーサマリ: form.formState.errors を集約表示 */}
-      {Object.keys(form.formState.errors).length > 0 && (
-        <div
-          role="alert"
-          className="mb-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm"
-        >
-          <p className="font-medium text-destructive">
-            入力内容に不備があります。下記をご確認ください。
-          </p>
-          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs">
-            {Object.entries(form.formState.errors).map(([name, err]) => {
-              const msg =
-                (err as { message?: string } | undefined)?.message ??
-                "入力を確認してください";
-              const label = FIELD_LABELS[name] ?? name;
-              return (
-                <li key={name} className="text-destructive">
-                  <button
-                    type="button"
-                    className="text-destructive underline-offset-2 hover:underline"
-                    onClick={() => {
-                      const el = document.querySelector<HTMLElement>(
-                        `[name="${name}"]`,
-                      );
-                      el?.scrollIntoView({
-                        behavior: "smooth",
-                        block: "center",
-                      });
-                      (el as HTMLInputElement | null)?.focus?.();
-                    }}
-                  >
-                    {label}: {msg}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
-
       <Form {...form}>
+        <div className="relative">
         <form
           onSubmit={form.handleSubmit(onSubmit, onInvalid)}
+          aria-busy={submitting}
           onKeyDown={(e) => {
             // Enter での誤送信を防ぎ、次のフォーカス可能要素へ移動する。
             // textarea 内の改行、IME 変換確定、送信ボタン自体の Enter は
@@ -1178,7 +1331,7 @@ export function CustomerForm({
             className="rounded-lg border bg-card"
           >
             {/* ========== 1. 労働者基本情報 ========== */}
-            <AccordionItem value="sec1">
+            <AccordionItem value="sec1" id="sec1">
               <AccordionTrigger className="px-4 text-base">
                 1. 労働者氏名
               </AccordionTrigger>
@@ -1241,7 +1394,7 @@ export function CustomerForm({
             </AccordionItem>
 
             {/* ========== 2. 雇用区分・契約期間 ========== */}
-            <AccordionItem value="sec2">
+            <AccordionItem value="sec2" id="sec2">
               <AccordionTrigger className="px-4 text-base">
                 2. 雇用区分・契約期間
               </AccordionTrigger>
@@ -1450,27 +1603,40 @@ export function CustomerForm({
                 />
 
                 {hasProbation === "yes" && (
-                  <FormField
-                    control={form.control}
-                    name="probation_period"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>
-                          試用期間<Req />
-                        </FormLabel>
-                        <FormControl>
-                          <Input placeholder="例:3ヶ月" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
+                  <>
+                    <div
+                      role="status"
+                      className="rounded-md border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900"
+                    >
+                      <p className="font-medium">事務所側で確認・追記する項目</p>
+                      <p className="mt-1 text-xs">
+                        試用期間中の労働条件差異(賃金・社会保険・勤務条件等)は、
+                        ご依頼元の事務所側で確認のうえ追記しますので、入力は不要です。
+                        期間のみご記入ください。
+                      </p>
+                    </div>
+                    <FormField
+                      control={form.control}
+                      name="probation_period"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>
+                            試用期間<Req />
+                          </FormLabel>
+                          <FormControl>
+                            <Input placeholder="例:3ヶ月" {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </>
                 )}
               </AccordionContent>
             </AccordionItem>
 
             {/* ========== 3. 就業場所 ========== */}
-            <AccordionItem value="sec3">
+            <AccordionItem value="sec3" id="sec3">
               <AccordionTrigger className="px-4 text-base">
                 3. 就業場所
               </AccordionTrigger>
@@ -1519,7 +1685,7 @@ export function CustomerForm({
             </AccordionItem>
 
             {/* ========== 4. 業務内容 ========== */}
-            <AccordionItem value="sec4">
+            <AccordionItem value="sec4" id="sec4">
               <AccordionTrigger className="px-4 text-base">
                 4. 業務内容
               </AccordionTrigger>
@@ -1566,7 +1732,7 @@ export function CustomerForm({
             </AccordionItem>
 
             {/* ========== 5. 所定労働時間・休日 ========== */}
-            <AccordionItem value="sec5">
+            <AccordionItem value="sec5" id="sec5">
               <AccordionTrigger className="px-4 text-base">
                 5. 所定労働時間・休日
               </AccordionTrigger>
@@ -1832,7 +1998,7 @@ export function CustomerForm({
             </AccordionItem>
 
             {/* ========== 6. 賃金 ========== */}
-            <AccordionItem value="sec6">
+            <AccordionItem value="sec6" id="sec6">
               <AccordionTrigger className="px-4 text-base">
                 6. 賃金
               </AccordionTrigger>
@@ -1903,6 +2069,49 @@ export function CustomerForm({
                     </FormItem>
                   )}
                 />
+
+                <FormField
+                  control={form.control}
+                  name="has_fixed_overtime"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>
+                        固定残業代(みなし残業手当)の有無<Req />
+                      </FormLabel>
+                      <FormControl>
+                        <RadioGroup
+                          onValueChange={field.onChange}
+                          value={field.value}
+                          className="flex gap-4 pt-1"
+                        >
+                          <Label className="flex items-center gap-2 font-normal">
+                            <RadioGroupItem value="no" /> なし
+                          </Label>
+                          <Label className="flex items-center gap-2 font-normal">
+                            <RadioGroupItem value="yes" /> あり
+                          </Label>
+                        </RadioGroup>
+                      </FormControl>
+                      <FormDescription>
+                        基本給に毎月定額の残業代を含めて支給している場合は「あり」。
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                {hasFixedOvertime === "yes" && (
+                  <div
+                    role="status"
+                    className="rounded-md border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900"
+                  >
+                    <p className="font-medium">事務所側で確認・追記する項目</p>
+                    <p className="mt-1 text-xs">
+                      固定残業代の名称・金額・時間数(みなし残業時間)は、
+                      ご依頼元の事務所側で確認のうえ追記しますので、入力は不要です。
+                    </p>
+                  </div>
+                )}
 
                 <FormField
                   control={form.control}
@@ -2116,7 +2325,7 @@ export function CustomerForm({
             </AccordionItem>
 
             {/* ========== 7. 社会保険・退職・定年等 ========== */}
-            <AccordionItem value="sec7">
+            <AccordionItem value="sec7" id="sec7">
               <AccordionTrigger className="px-4 text-base">
                 7. 社会保険・退職・定年等
               </AccordionTrigger>
@@ -2271,6 +2480,11 @@ export function CustomerForm({
             </Button>
           </div>
         </form>
+        <BusyOverlay
+          show={submitting}
+          label={isAdminEdit ? "保存中..." : "送信中..."}
+        />
+        </div>
       </Form>
     </Wrapper>
   );

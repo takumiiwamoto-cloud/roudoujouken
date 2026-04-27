@@ -42,14 +42,19 @@ export default function CustomerCompletePage() {
           <br />
           <b>事務所からの納品までお待ちください。</b>
         </p>
+        <p className="mt-4 rounded-md bg-white/60 p-3 text-sm font-medium leading-relaxed text-emerald-900">
+          このページはこのまま閉じていただいて問題ありません。
+        </p>
       </div>
 
-      <div className="mt-6 rounded-md border bg-muted/40 p-4 text-xs text-muted-foreground leading-relaxed">
-        <p>
-          ご入力いただいた内容の修正が必要な場合は、お手数ですが依頼元の事務所までご連絡ください。
+      <div className="mt-6 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm leading-relaxed text-amber-900">
+        <p className="font-semibold">ブラウザの「戻る」操作はしないでください</p>
+        <p className="mt-1 text-xs">
+          入力URLは送信済みのため、同じURLからの再入力・再送信はできません。
+          ブラウザの「戻る」ボタンで前のページに戻っても再送信はできず、エラー画面が表示されます。
         </p>
-        <p className="mt-2">
-          このページは閉じていただいて問題ありません。入力URLは送信済みのため、同じURLからの再入力はできません。
+        <p className="mt-2 text-xs">
+          ご入力いただいた内容の修正が必要な場合は、お手数ですが依頼元の事務所までご連絡ください。
         </p>
       </div>
     </main>

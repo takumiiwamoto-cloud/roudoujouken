@@ -39,7 +39,8 @@ export function DashboardSearch({ initialQ }: { initialQ: string }) {
     >
       <Input
         type="search"
-        placeholder="会社名で絞り込み"
+        placeholder="会社名で検索(部分一致)"
+        aria-label="会社名で検索(部分一致・大文字小文字区別なし)"
         value={q}
         onChange={(e) => setQ(e.target.value)}
         className="w-64"
