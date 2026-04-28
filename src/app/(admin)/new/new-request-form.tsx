@@ -155,7 +155,7 @@ export function NewRequestForm({ templates, defaultExpiresOn }: Props) {
 
       <div className="space-y-1.5">
         <Label htmlFor="company_name">
-          会社名 <span className="text-destructive">*</span>
+          会社名 <span className="ml-0.5 text-base font-bold leading-none text-destructive" aria-hidden>*</span><span className="sr-only">(必須)</span>
         </Label>
         <Input
           id="company_name"
@@ -172,7 +172,7 @@ export function NewRequestForm({ templates, defaultExpiresOn }: Props) {
 
       <div className="space-y-1.5">
         <Label htmlFor="representative_name">
-          代表者氏名 <span className="text-destructive">*</span>
+          代表者氏名 <span className="ml-0.5 text-base font-bold leading-none text-destructive" aria-hidden>*</span><span className="sr-only">(必須)</span>
         </Label>
         <Input
           id="representative_name"
@@ -191,7 +191,7 @@ export function NewRequestForm({ templates, defaultExpiresOn }: Props) {
 
       <div className="space-y-1.5">
         <Label htmlFor="company_address">
-          会社所在地 <span className="text-destructive">*</span>
+          会社所在地 <span className="ml-0.5 text-base font-bold leading-none text-destructive" aria-hidden>*</span><span className="sr-only">(必須)</span>
         </Label>
         <Input
           id="company_address"
@@ -209,7 +209,7 @@ export function NewRequestForm({ templates, defaultExpiresOn }: Props) {
 
       <div className="space-y-1.5">
         <Label htmlFor="template_name">
-          ひな形 <span className="text-destructive">*</span>
+          ひな形 <span className="ml-0.5 text-base font-bold leading-none text-destructive" aria-hidden>*</span><span className="sr-only">(必須)</span>
         </Label>
         <Select
           value={form.template_name}
@@ -240,7 +240,7 @@ export function NewRequestForm({ templates, defaultExpiresOn }: Props) {
 
       <div className="space-y-1.5">
         <Label htmlFor="expires_on">
-          URL有効期限 <span className="text-destructive">*</span>
+          URL有効期限 <span className="ml-0.5 text-base font-bold leading-none text-destructive" aria-hidden>*</span><span className="sr-only">(必須)</span>
         </Label>
         <Input
           id="expires_on"

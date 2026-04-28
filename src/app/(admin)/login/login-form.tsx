@@ -52,7 +52,16 @@ export function LoginForm() {
   return (
     <form onSubmit={handleSubmit} className="mt-6 space-y-4">
       <div className="space-y-1.5">
-        <Label htmlFor="email">メールアドレス</Label>
+        <Label htmlFor="email">
+          メールアドレス
+          <span
+            className="ml-0.5 text-base font-bold leading-none text-destructive"
+            aria-hidden
+          >
+            *
+          </span>
+          <span className="sr-only">(必須)</span>
+        </Label>
         <Input
           id="email"
           type="email"
@@ -65,7 +74,16 @@ export function LoginForm() {
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="password">パスワード</Label>
+        <Label htmlFor="password">
+          パスワード
+          <span
+            className="ml-0.5 text-base font-bold leading-none text-destructive"
+            aria-hidden
+          >
+            *
+          </span>
+          <span className="sr-only">(必須)</span>
+        </Label>
         <Input
           id="password"
           type="password"

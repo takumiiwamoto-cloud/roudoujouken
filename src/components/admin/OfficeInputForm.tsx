@@ -262,10 +262,72 @@ export function OfficeInputForm({
         ? "ステータスを変更しています..."
         : "";
 
+  const errorCount = validation.issues.filter(
+    (i) => i.severity === "error",
+  ).length;
+  const warningCount = validation.issues.filter(
+    (i) => i.severity === "warning",
+  ).length;
+
   return (
     <div className="relative space-y-6" aria-busy={busy}>
+      {/* sticky 簡易ステータスバー: 上部に常時固定。
+          詳細は Section 6 の ValidationSummary に表示される(ジャンプ可能)。
+          モバイルでは AdminShell ハンバーガー(h-12)直下に位置するよう top-12。 */}
+      <div className="sticky top-12 z-10 -mx-4 border-b bg-background/95 px-4 py-2 backdrop-blur md:-mx-6 md:top-0 md:px-6">
+        <button
+          type="button"
+          onClick={() => {
+            const sec = document.getElementById("office-sec6");
+            sec?.scrollIntoView({ behavior: "smooth", block: "start" });
+          }}
+          className="flex w-full items-center gap-2 text-left"
+        >
+          <span className="text-xs text-muted-foreground">
+            バリデーション:
+          </span>
+          {errorCount === 0 && warningCount === 0 ? (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-900">
+              <span
+                className="inline-block h-2 w-2 rounded-full bg-emerald-500"
+                aria-hidden
+              />
+              OK(docx 生成可能)
+            </span>
+          ) : (
+            <>
+              {errorCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-destructive/15 px-2 py-0.5 text-xs font-medium text-destructive">
+                  <span
+                    className="inline-block h-2 w-2 rounded-full bg-destructive"
+                    aria-hidden
+                  />
+                  エラー {errorCount}件
+                </span>
+              )}
+              {warningCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900">
+                  <span
+                    className="inline-block h-2 w-2 rounded-full bg-amber-500"
+                    aria-hidden
+                  />
+                  警告 {warningCount}件
+                </span>
+              )}
+            </>
+          )}
+          <span className="ml-auto text-xs text-muted-foreground hover:underline">
+            詳細を見る →
+          </span>
+        </button>
+      </div>
+
       {/* Section 2. 労働時間制の専門判断 */}
-      <FormSection title="2. 労働時間制の専門判断">
+      <FormSection
+        title="2. 労働時間制の専門判断"
+        id="office-sec2"
+        nextSectionId="office-sec3"
+      >
         <Field label="労働時間制区分">
           <Select
             value={values.worktime_type ?? ""}
@@ -356,7 +418,11 @@ export function OfficeInputForm({
       </FormSection>
 
       {/* Section 3. 管理監督者 */}
-      <FormSection title="3. 管理監督者・特殊区分">
+      <FormSection
+        title="3. 管理監督者・特殊区分"
+        id="office-sec3"
+        nextSectionId="office-sec4"
+      >
         <Field
           label="管理監督者区分"
           hint="日本マクドナルド事件(H20.1.28 東京地判)の4要件で判断"
@@ -414,7 +480,11 @@ export function OfficeInputForm({
       </FormSection>
 
       {/* Section 4. 固定残業代 */}
-      <FormSection title="4. 固定残業代の設計">
+      <FormSection
+        title="4. 固定残業代の設計"
+        id="office-sec4"
+        nextSectionId="office-sec5"
+      >
         {clientHasFixedOvertime === "no" ? (
           <p className="rounded-md border border-muted bg-muted/40 p-3 text-sm text-muted-foreground">
             顧客側で「固定残業代なし」が選択されています。詳細入力は不要です。
@@ -512,7 +582,11 @@ export function OfficeInputForm({
       </FormSection>
 
       {/* Section 5. 試用期間(顧客側で "あり" のときのみ詳細表示) */}
-      <FormSection title="5. 試用期間の詳細">
+      <FormSection
+        title="5. 試用期間の詳細"
+        id="office-sec5"
+        nextSectionId="office-sec7"
+      >
         {clientHasProbation === "no" ? (
           <p className="rounded-md border border-muted bg-muted/40 p-3 text-sm text-muted-foreground">
             顧客側で「試用期間なし」が選択されています。詳細入力は不要です。
@@ -600,7 +674,11 @@ export function OfficeInputForm({
       </FormSection>
 
       {/* Section 7. 契約書記載の補助情報(docx 生成用) */}
-      <FormSection title="7. 契約書記載の補助情報(docx生成用)">
+      <FormSection
+        title="7. 契約書記載の補助情報(docx生成用)"
+        id="office-sec7"
+        nextSectionId="office-sec6"
+      >
         <Field label="時間外労働の有無" hint="Sheet06『overtime_type』タグに反映">
           <Select
             value={values.overtime_type ?? ""}
@@ -657,7 +735,7 @@ export function OfficeInputForm({
       </FormSection>
 
       {/* Section 6. 最終チェック + 内部メモ */}
-      <FormSection title="6. 最終チェック・納品メモ">
+      <FormSection title="6. 最終チェック・納品メモ" id="office-sec6">
         <Field
           label="事務所内部メモ / 納品メモ"
           hint="担当者間の申し送り、納品時の備考等"
@@ -797,15 +875,38 @@ export function OfficeInputForm({
 
 function FormSection({
   title,
+  id,
+  nextSectionId,
   children,
 }: {
   title: string;
+  id?: string;
+  /** 「次のセクションへ」ボタンの飛び先。省略時はボタン非表示。 */
+  nextSectionId?: string;
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-lg border bg-card p-4 md:p-5">
+    <section
+      id={id}
+      className="rounded-lg border border-l-4 border-l-sky-400 bg-card p-4 md:p-5"
+    >
       <h3 className="mb-3 text-sm font-semibold">{title}</h3>
       <div className="space-y-4">{children}</div>
+      {nextSectionId && (
+        <div className="mt-4 flex justify-end">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              const sec = document.getElementById(nextSectionId);
+              sec?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          >
+            次のセクションへ →
+          </Button>
+        </div>
+      )}
     </section>
   );
 }

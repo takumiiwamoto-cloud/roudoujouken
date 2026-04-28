@@ -102,9 +102,117 @@ const SOCIAL_INSURANCE_LABELS: Record<string, string> = {
 /** 必須マーク。2024年改正必須項目には theme=kaisei を付けて注記色に。 */
 function Req({ kaisei = false }: { kaisei?: boolean }) {
   return (
-    <span className={kaisei ? "text-amber-600" : "text-destructive"}>
-      {kaisei ? " *(2024年改正)" : " *"}
+    <span className="inline-flex items-baseline gap-1.5 align-baseline">
+      <span
+        className="text-base font-bold leading-none text-destructive"
+        aria-hidden
+      >
+        *
+      </span>
+      <span className="sr-only">(必須)</span>
+      {kaisei && (
+        <span
+          className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-indigo-700"
+          title="2024年4月の労基法改正で明示が義務化された項目です"
+        >
+          2024改正
+        </span>
+      )}
     </span>
+  );
+}
+
+// セクションメタデータ(色分け・進捗判定・次へ遷移で参照)
+type SectionMeta = {
+  id: string;
+  title: string;
+  is2024Amend: boolean;
+};
+const SECTIONS: readonly SectionMeta[] = [
+  { id: "sec1", title: "1. 労働者氏名", is2024Amend: false },
+  { id: "sec2", title: "2. 雇用区分・契約期間", is2024Amend: false },
+  { id: "sec3", title: "3. 就業場所", is2024Amend: true },
+  { id: "sec4", title: "4. 業務内容", is2024Amend: true },
+  { id: "sec5", title: "5. 所定労働時間・休日", is2024Amend: false },
+  { id: "sec6", title: "6. 賃金", is2024Amend: false },
+  { id: "sec7", title: "7. 社会保険・退職・定年等", is2024Amend: false },
+] as const;
+
+/**
+ * 各セクションの「常時必須」フィールド一覧。
+ * 完了ドットの判定で使う(条件付き必須は zod superRefine で送信時に検証されるため、
+ * ドット判定上は考慮しない・目安としての挙動)。
+ */
+const SECTION_REQUIRED_FIELDS: Record<string, string[]> = {
+  sec1: ["last_name", "first_name"],
+  sec2: [
+    "employment_type",
+    "has_contract_period",
+    "contract_start_date",
+    "has_probation",
+  ],
+  sec3: ["work_location_initial", "work_location_scope"],
+  sec4: ["job_description_initial", "job_description_scope"],
+  sec5: ["work_time_type", "holidays"],
+  sec6: [
+    "wage_type",
+    "basic_wage",
+    "has_fixed_overtime",
+    "has_allowances",
+    "payment_cutoff_day",
+    "payment_date",
+    "payment_method",
+  ],
+  // sec7 は必須項目なし。何か入力されていれば done、なければ empty で扱う。
+  sec7: [],
+};
+
+/** sec7 の参考フィールド(empty/done 判定用)。 */
+const SECTION7_OPTIONAL_FIELDS = [
+  "social_insurance",
+  "retirement_clause",
+  "retirement_age",
+  "remarks",
+];
+
+type SectionStatus = "done" | "partial" | "empty";
+
+function SectionDot({ status }: { status: SectionStatus }) {
+  if (status === "done") {
+    return (
+      <span
+        className="ml-2 inline-flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-white"
+        aria-label="入力完了"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          className="h-3 w-3"
+          aria-hidden="true"
+        >
+          <path
+            fillRule="evenodd"
+            d="M16.704 5.29a1 1 0 010 1.42l-7.5 7.5a1 1 0 01-1.42 0l-3.5-3.5a1 1 0 111.42-1.42L8.5 12.08l6.79-6.79a1 1 0 011.414 0z"
+            clipRule="evenodd"
+          />
+        </svg>
+      </span>
+    );
+  }
+  if (status === "partial") {
+    return (
+      <span
+        className="ml-2 inline-block h-2.5 w-2.5 rounded-full bg-amber-500"
+        aria-label="一部入力済み"
+      />
+    );
+  }
+  return (
+    <span
+      className="ml-2 inline-block h-2 w-2 rounded-full bg-muted-foreground/30"
+      aria-hidden
+    />
   );
 }
 
@@ -748,6 +856,58 @@ export function CustomerForm({
   const paymentCutoff = form.watch("payment_cutoff_day");
   const holidays = form.watch("holidays");
 
+  // セクション完了状態の判定(進捗バー & アコーディオンタイトルのドットで使用)。
+  // 注意: 条件付き必須(zod superRefine 由来)は完璧には拾えない目安判定。
+  const watchedAll = form.watch();
+  const sectionStatuses: Record<string, SectionStatus> = {};
+  for (const sec of SECTIONS) {
+    const required = SECTION_REQUIRED_FIELDS[sec.id] ?? [];
+    const fieldsToCheck =
+      required.length > 0 ? required : SECTION7_OPTIONAL_FIELDS;
+    const isFilled = (name: string) => {
+      const v = (watchedAll as Record<string, unknown>)[name];
+      if (Array.isArray(v)) return v.length > 0;
+      if (typeof v === "number") return v > 0;
+      if (typeof v === "string") return v.trim().length > 0;
+      return v !== undefined && v !== null && v !== "";
+    };
+    const filledCount = fieldsToCheck.filter(isFilled).length;
+    const hasError = fieldsToCheck.some(
+      (f) =>
+        (form.formState.errors as Record<string, unknown>)[f] !== undefined,
+    );
+    if (required.length === 0) {
+      // sec7: 任意項目のみ。1つでも入っていれば done、何もなければ empty。
+      sectionStatuses[sec.id] = filledCount > 0 ? "done" : "empty";
+    } else if (filledCount === 0) {
+      sectionStatuses[sec.id] = "empty";
+    } else if (filledCount === required.length && !hasError) {
+      sectionStatuses[sec.id] = "done";
+    } else {
+      sectionStatuses[sec.id] = "partial";
+    }
+  }
+  const doneCount = Object.values(sectionStatuses).filter(
+    (s) => s === "done",
+  ).length;
+
+  // 「次のセクションへ」: アコーディオン末尾のボタンから呼ぶ。
+  const goToNextSection = (currentId: string) => {
+    const idx = SECTIONS.findIndex((s) => s.id === currentId);
+    if (idx < 0 || idx >= SECTIONS.length - 1) return;
+    const next = SECTIONS[idx + 1].id;
+    const sec = document.getElementById(next);
+    const trigger = sec?.querySelector<HTMLButtonElement>(
+      "button[aria-expanded]",
+    );
+    if (trigger && trigger.getAttribute("aria-expanded") !== "true") {
+      trigger.click();
+    }
+    setTimeout(() => {
+      sec?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 200);
+  };
+
   // Sheet04 の表示制御
   const isFullTime = employmentType === "seishain";
   const showContractPeriodSelector = !isFullTime; // 正社員は「なし固定」なので選択UIを隠す
@@ -1141,43 +1301,94 @@ export function CustomerForm({
 
   return (
     <Wrapper className={isAdminEdit ? "" : "mx-auto max-w-3xl p-4 md:p-8"}>
-      {/* 最低賃金違反の sticky バナー(顧客モードのみ・NG 時のみ表示) */}
-      {!isAdminEdit && minWageNgInfo && (
-        <div
-          role="alert"
-          className="sticky top-0 z-20 -mx-4 mb-4 border-b-2 border-destructive bg-destructive/15 px-4 py-2 backdrop-blur md:-mx-8 md:px-8"
-        >
-          <div className="flex items-start gap-2">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
-              aria-hidden="true"
+      {/* sticky 領域: 最低賃金 NG バナー(優先) + 進捗バーをスタックで上部固定。
+          単一の sticky コンテナにまとめることで、両方表示時に重ならず縦に並ぶ。 */}
+      {!isAdminEdit && (
+        <div className="sticky top-0 z-20 -mx-4 mb-4 md:-mx-8">
+          {minWageNgInfo && (
+            <div
+              role="alert"
+              className="border-b-2 border-destructive bg-destructive/15 px-4 py-2 backdrop-blur md:px-8"
             >
-              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
-              <line x1="12" y1="9" x2="12" y2="13" />
-              <line x1="12" y1="17" x2="12.01" y2="17" />
-            </svg>
-            <div className="min-w-0 flex-1 text-xs leading-relaxed text-destructive">
-              <p className="font-semibold">
-                最低賃金違反: 時給換算 {minWageNgInfo.hourly}円 が{minWageNgInfo.prefecture}の最低賃金 {minWageNgInfo.threshold}円 を下回ります
-              </p>
-              <p className="mt-0.5">
-                基本給を再確認してください。このままでは送信できません。
-              </p>
+              <div className="flex items-start gap-2">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
+                  aria-hidden="true"
+                >
+                  <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+                <div className="min-w-0 flex-1 text-xs leading-relaxed text-destructive">
+                  <p className="font-semibold">
+                    最低賃金違反: 時給換算 {minWageNgInfo.hourly}円 が{minWageNgInfo.prefecture}の最低賃金 {minWageNgInfo.threshold}円 を下回ります
+                  </p>
+                  <p className="mt-0.5">
+                    基本給を再確認してください。このままでは送信できません。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => jumpToField("basic_wage")}
+                  className="shrink-0 rounded-md border border-destructive/40 bg-background px-2 py-1 text-xs font-medium text-destructive hover:bg-destructive/10"
+                >
+                  基本給を確認
+                </button>
+              </div>
             </div>
-            <button
-              type="button"
-              onClick={() => jumpToField("basic_wage")}
-              className="shrink-0 rounded-md border border-destructive/40 bg-background px-2 py-1 text-xs font-medium text-destructive hover:bg-destructive/10"
-            >
-              基本給を確認
-            </button>
+          )}
+          {/* 進捗バー: 7セクションを横一列の小さなブロックで可視化。 */}
+          <div className="border-b bg-background/95 px-4 py-2 backdrop-blur md:px-8">
+            <div className="flex items-center gap-3">
+              <span className="shrink-0 text-xs text-muted-foreground">
+                入力進捗 {doneCount}/{SECTIONS.length}
+              </span>
+              <div className="flex flex-1 gap-1">
+                {SECTIONS.map((s) => {
+                  const st = sectionStatuses[s.id];
+                  const cls =
+                    st === "done"
+                      ? "bg-emerald-500"
+                      : st === "partial"
+                        ? "bg-amber-400"
+                        : "bg-muted-foreground/20";
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => {
+                        const sec = document.getElementById(s.id);
+                        const trigger = sec?.querySelector<HTMLButtonElement>(
+                          "button[aria-expanded]",
+                        );
+                        if (
+                          trigger &&
+                          trigger.getAttribute("aria-expanded") !== "true"
+                        ) {
+                          trigger.click();
+                        }
+                        setTimeout(() => {
+                          sec?.scrollIntoView({
+                            behavior: "smooth",
+                            block: "start",
+                          });
+                        }, 200);
+                      }}
+                      className={`h-1.5 flex-1 rounded transition-colors ${cls}`}
+                      aria-label={`${s.title} (${st === "done" ? "完了" : st === "partial" ? "一部" : "未入力"})`}
+                      title={s.title}
+                    />
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1331,9 +1542,16 @@ export function CustomerForm({
             className="rounded-lg border bg-card"
           >
             {/* ========== 1. 労働者基本情報 ========== */}
-            <AccordionItem value="sec1" id="sec1">
+            <AccordionItem
+              value="sec1"
+              id="sec1"
+              className="border-l-4 border-l-sky-400"
+            >
               <AccordionTrigger className="px-4 text-base">
-                1. 労働者氏名
+                <span className="flex items-center">
+                  1. 労働者氏名
+                  <SectionDot status={sectionStatuses.sec1} />
+                </span>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 space-y-4">
                 <div className="grid gap-4 md:grid-cols-2">
@@ -1390,13 +1608,30 @@ export function CustomerForm({
                     </p>
                   </div>
                 )}
+                <div className="flex justify-end pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => goToNextSection("sec1")}
+                  >
+                    次のセクションへ →
+                  </Button>
+                </div>
               </AccordionContent>
             </AccordionItem>
 
             {/* ========== 2. 雇用区分・契約期間 ========== */}
-            <AccordionItem value="sec2" id="sec2">
+            <AccordionItem
+              value="sec2"
+              id="sec2"
+              className="border-l-4 border-l-sky-400"
+            >
               <AccordionTrigger className="px-4 text-base">
-                2. 雇用区分・契約期間
+                <span className="flex items-center">
+                  2. 雇用区分・契約期間
+                  <SectionDot status={sectionStatuses.sec2} />
+                </span>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 space-y-4">
                 <FormField
@@ -1632,13 +1867,30 @@ export function CustomerForm({
                     />
                   </>
                 )}
+                <div className="flex justify-end pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => goToNextSection("sec2")}
+                  >
+                    次のセクションへ →
+                  </Button>
+                </div>
               </AccordionContent>
             </AccordionItem>
 
-            {/* ========== 3. 就業場所 ========== */}
-            <AccordionItem value="sec3" id="sec3">
+            {/* ========== 3. 就業場所(2024改正項目を含む) ========== */}
+            <AccordionItem
+              value="sec3"
+              id="sec3"
+              className="border-l-4 border-l-indigo-500"
+            >
               <AccordionTrigger className="px-4 text-base">
-                3. 就業場所
+                <span className="flex items-center">
+                  3. 就業場所
+                  <SectionDot status={sectionStatuses.sec3} />
+                </span>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 space-y-4">
                 <FormField
@@ -1681,13 +1933,30 @@ export function CustomerForm({
                     </FormItem>
                   )}
                 />
+                <div className="flex justify-end pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => goToNextSection("sec3")}
+                  >
+                    次のセクションへ →
+                  </Button>
+                </div>
               </AccordionContent>
             </AccordionItem>
 
             {/* ========== 4. 業務内容 ========== */}
-            <AccordionItem value="sec4" id="sec4">
+            <AccordionItem
+              value="sec4"
+              id="sec4"
+              className="border-l-4 border-l-indigo-500"
+            >
               <AccordionTrigger className="px-4 text-base">
-                4. 業務内容
+                <span className="flex items-center">
+                  4. 業務内容
+                  <SectionDot status={sectionStatuses.sec4} />
+                </span>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 space-y-4">
                 <FormField
@@ -1728,13 +1997,30 @@ export function CustomerForm({
                     </FormItem>
                   )}
                 />
+                <div className="flex justify-end pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => goToNextSection("sec4")}
+                  >
+                    次のセクションへ →
+                  </Button>
+                </div>
               </AccordionContent>
             </AccordionItem>
 
             {/* ========== 5. 所定労働時間・休日 ========== */}
-            <AccordionItem value="sec5" id="sec5">
+            <AccordionItem
+              value="sec5"
+              id="sec5"
+              className="border-l-4 border-l-sky-400"
+            >
               <AccordionTrigger className="px-4 text-base">
-                5. 所定労働時間・休日
+                <span className="flex items-center">
+                  5. 所定労働時間・休日
+                  <SectionDot status={sectionStatuses.sec5} />
+                </span>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 space-y-4">
                 <FormField
@@ -1994,13 +2280,30 @@ export function CustomerForm({
                     </FormItem>
                   )}
                 />
+                <div className="flex justify-end pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => goToNextSection("sec5")}
+                  >
+                    次のセクションへ →
+                  </Button>
+                </div>
               </AccordionContent>
             </AccordionItem>
 
             {/* ========== 6. 賃金 ========== */}
-            <AccordionItem value="sec6" id="sec6">
+            <AccordionItem
+              value="sec6"
+              id="sec6"
+              className="border-l-4 border-l-sky-400"
+            >
               <AccordionTrigger className="px-4 text-base">
-                6. 賃金
+                <span className="flex items-center">
+                  6. 賃金
+                  <SectionDot status={sectionStatuses.sec6} />
+                </span>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 space-y-4">
                 <FormField
@@ -2321,13 +2624,30 @@ export function CustomerForm({
                     </FormItem>
                   )}
                 />
+                <div className="flex justify-end pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => goToNextSection("sec6")}
+                  >
+                    次のセクションへ →
+                  </Button>
+                </div>
               </AccordionContent>
             </AccordionItem>
 
             {/* ========== 7. 社会保険・退職・定年等 ========== */}
-            <AccordionItem value="sec7" id="sec7">
+            <AccordionItem
+              value="sec7"
+              id="sec7"
+              className="border-l-4 border-l-sky-400"
+            >
               <AccordionTrigger className="px-4 text-base">
-                7. 社会保険・退職・定年等
+                <span className="flex items-center">
+                  7. 社会保険・退職・定年等
+                  <SectionDot status={sectionStatuses.sec7} />
+                </span>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 space-y-4">
                 <FormField
@@ -2407,9 +2727,14 @@ export function CustomerForm({
                         otherLabel="その他(自由記述)"
                         otherPlaceholder="退職に関する事項を自由記述"
                       />
-                      <p className="text-[11px] leading-relaxed text-muted-foreground">
-                        労基法15条・施行規則5条で明示必須の事項です。就業規則を参照する形式でも適法とされています(厚生労働省モデル労働条件通知書準拠)。
-                      </p>
+                      <details className="text-[11px] leading-relaxed text-muted-foreground">
+                        <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                          詳細(法令解説)
+                        </summary>
+                        <p className="mt-1">
+                          労基法15条・施行規則5条で明示必須の事項です。就業規則を参照する形式でも適法とされています(厚生労働省モデル労働条件通知書準拠)。
+                        </p>
+                      </details>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -2430,9 +2755,14 @@ export function CustomerForm({
                         otherLabel="その他(自由記述)"
                         otherPlaceholder="定年の定めを自由記述"
                       />
-                      <p className="text-[11px] leading-relaxed text-muted-foreground">
-                        高年齢者雇用安定法8条により、定年を定める場合は60歳以上とする必要があります。また同法9条により65歳までの雇用確保措置(定年の引上げ・継続雇用制度・定年廃止のいずれか)が義務付けられています。
-                      </p>
+                      <details className="text-[11px] leading-relaxed text-muted-foreground">
+                        <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                          詳細(法令解説)
+                        </summary>
+                        <p className="mt-1">
+                          高年齢者雇用安定法8条により、定年を定める場合は60歳以上とする必要があります。また同法9条により65歳までの雇用確保措置(定年の引上げ・継続雇用制度・定年廃止のいずれか)が義務付けられています。
+                        </p>
+                      </details>
                       <FormMessage />
                     </FormItem>
                   )}
