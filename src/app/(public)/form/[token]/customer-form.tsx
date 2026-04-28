@@ -90,6 +90,7 @@ const WEEKDAY_LABELS: Record<string, string> = {
   fri: "金",
   sat: "土",
   sun: "日",
+  holiday: "祝日",
 };
 
 const SOCIAL_INSURANCE_LABELS: Record<string, string> = {
@@ -1063,8 +1064,9 @@ export function CustomerForm({
     const net = calcNetWorkMinutes(startTime, endTime, br);
     if (net === null) return null;
     const dailyHours = net / 60;
+    // 「祝日」は年16日程度・週ベースに換算しないため、所定労働日数計算から除外。
     const weekdayHolidayCount = holidays?.includes("weekday")
-      ? holidayWeekdays?.length ?? 0
+      ? holidayWeekdays?.filter((w) => w !== "holiday").length ?? 0
       : 0;
     const workingDaysPerWeek = Math.max(7 - weekdayHolidayCount, 0);
     if (workingDaysPerWeek === 0) return null;

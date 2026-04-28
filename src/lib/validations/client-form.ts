@@ -64,6 +64,7 @@ export const weekdayValues = [
   "fri",
   "sat",
   "sun",
+  "holiday", // 祝日(国民の祝日に関する法律で定める休日)
 ] as const;
 
 const baseClientFormSchema = z.object({

@@ -88,6 +88,7 @@ const WEEKDAY: Record<string, string> = {
   fri: "金",
   sat: "土",
   sun: "日",
+  holiday: "祝日",
 };
 const SOCIAL_INSURANCE: Record<string, string> = {
   health: "健康保険",
@@ -140,9 +141,17 @@ const DEFAULT_LEAVE_CLAUSE = "年次有給休暇、就業規則に定める特�
 function buildHolidaysText(client: ClientFormValues): string {
   const parts: string[] = [];
   if (client.holidays?.includes("weekday") && client.holiday_weekdays?.length) {
-    parts.push(
-      client.holiday_weekdays.map((w) => WEEKDAY[w] ?? w).join("・") + "曜日",
-    );
+    // 「祝日」は「曜日」サフィックスを付けず別ラベルとして扱う(例: 土・日曜日、祝日)
+    const weekdays = client.holiday_weekdays.filter((w) => w !== "holiday");
+    const hasHoliday = client.holiday_weekdays.includes("holiday");
+    const segments: string[] = [];
+    if (weekdays.length) {
+      segments.push(
+        weekdays.map((w) => WEEKDAY[w] ?? w).join("・") + "曜日",
+      );
+    }
+    if (hasHoliday) segments.push("祝日");
+    if (segments.length) parts.push(segments.join("、"));
   }
   if (client.holidays?.includes("shift")) parts.push("シフト制による");
   if (client.holidays?.includes("other")) parts.push("その他");
@@ -167,8 +176,10 @@ function weeklyWorkHours(client: ClientFormValues): string {
   const net = calcNetWorkMinutes(client.start_time, client.end_time, breakMin);
   if (net === null) return "";
   const dailyHours = net / 60;
+  // 1週の所定労働日数計算からは「祝日」を除外する(年16日程度・週ベースに換算しない)。
+  // 月給の最低賃金換算でも同様の理由で除外。
   const weekdayHolidayCount = client.holidays?.includes("weekday")
-    ? client.holiday_weekdays?.length ?? 0
+    ? client.holiday_weekdays?.filter((w) => w !== "holiday").length ?? 0
     : 0;
   const workingDaysPerWeek = Math.max(7 - weekdayHolidayCount, 0);
   return num(dailyHours * workingDaysPerWeek);

@@ -53,8 +53,9 @@ const OTHER_DEFAULT_ANNUAL_HOLIDAYS = 120;
 /**
  * 休日設定から年間休日数を推定する。
  * - 曜日指定(weekday) かつ holiday_weekdays 選択あり:
- *     52 × 選択曜日数 + 祝日16日(ただし土日選択時は祝日が土日と重なる可能性を
- *     簡便化のため無視。実務上は事務所側で精緻化可能)
+ *     52 × 選択曜日数(月〜日) + 「祝日」選択時は +16日(国民の祝日)
+ *     ※「祝日」を選択していなければ祝日は含めない(=完全週固定の事業所向け)。
+ *     ※土日選択時に祝日が土日と重なる可能性は簡便化のため無視(事務所側で精緻化可)。
  * - シフト制(shift): 120日(固定デフォルト)
  * - その他(other): 120日(固定デフォルト)
  * いずれも該当しなければ null を返す(=最賃チェックをスキップ)。
@@ -66,9 +67,15 @@ export function estimateAnnualHolidays(
   if (!holidays || holidays.length === 0) return null;
 
   if (holidays.includes("weekday")) {
-    const n = holidayWeekdays?.length ?? 0;
-    if (n === 0) return null;
-    return 52 * n + JAPANESE_PUBLIC_HOLIDAYS_PER_YEAR;
+    const weekdaysOnly = (holidayWeekdays ?? []).filter(
+      (w) => w !== "holiday",
+    );
+    const hasPublicHolidays = (holidayWeekdays ?? []).includes("holiday");
+    const n = weekdaysOnly.length;
+    if (n === 0 && !hasPublicHolidays) return null;
+    return (
+      52 * n + (hasPublicHolidays ? JAPANESE_PUBLIC_HOLIDAYS_PER_YEAR : 0)
+    );
   }
   if (holidays.includes("shift")) {
     return SHIFT_DEFAULT_ANNUAL_HOLIDAYS;
